@@ -1,18 +1,16 @@
 use std::fmt;
 
+use shakmaty::fen::Fen;
+use shakmaty::uci::UciMove;
+use shakmaty::{
+    CastlingMode, Chess, Color as ShakmatyColor, File, Position as ShakmatyPosition, Rank,
+    Role as ShakmatyRole, Square as ShakmatySquare,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Color {
     White,
     Black,
-}
-
-impl Color {
-    pub fn opposite(self) -> Self {
-        match self {
-            Self::White => Self::Black,
-            Self::Black => Self::White,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +36,10 @@ pub struct Square {
 }
 
 impl Square {
+    pub(crate) fn from_coords(file: usize, rank: usize) -> Option<Self> {
+        (file < 8 && rank < 8).then_some(Self { file, rank })
+    }
+
     pub fn file(self) -> usize {
         self.file
     }
@@ -46,18 +48,15 @@ impl Square {
         self.rank
     }
 
-    fn from_uci(value: &[u8]) -> Result<Self, MoveError> {
-        if value.len() != 2
-            || !(b'a'..=b'h').contains(&value[0])
-            || !(b'1'..=b'8').contains(&value[1])
-        {
-            return Err(MoveError("invalid UCI square"));
+    fn from_shakmaty(square: ShakmatySquare) -> Self {
+        Self {
+            file: square.file().to_u32() as usize,
+            rank: square.rank().to_u32() as usize,
         }
+    }
 
-        Ok(Self {
-            file: (value[0] - b'a') as usize,
-            rank: (value[1] - b'1') as usize,
-        })
+    fn to_shakmaty(self) -> ShakmatySquare {
+        ShakmatySquare::from_coords(File::new(self.file as u32), Rank::new(self.rank as u32))
     }
 }
 
@@ -65,230 +64,123 @@ impl Square {
 pub struct ChessMove {
     pub from: Square,
     pub to: Square,
-    promotion: Option<Role>,
+    uci: UciMove,
 }
 
 impl ChessMove {
     pub fn from_uci(value: &str) -> Result<Self, MoveError> {
-        let value = value.as_bytes();
-        if value.len() != 4 && value.len() != 5 {
-            return Err(MoveError("UCI move must contain four or five characters"));
-        }
+        let uci: UciMove = value
+            .parse()
+            .map_err(|error| MoveError(format!("invalid UCI move: {error}")))?;
+        Self::from_uci_move(uci)
+    }
 
-        let promotion = if value.len() == 5 {
-            Some(match value[4] {
-                b'n' => Role::Knight,
-                b'b' => Role::Bishop,
-                b'r' => Role::Rook,
-                b'q' => Role::Queen,
-                _ => return Err(MoveError("invalid UCI promotion role")),
-            })
-        } else {
-            None
-        };
-
-        Ok(Self {
-            from: Square::from_uci(&value[0..2])?,
-            to: Square::from_uci(&value[2..4])?,
-            promotion,
-        })
+    fn from_uci_move(uci: UciMove) -> Result<Self, MoveError> {
+        let from = uci
+            .from()
+            .map(Square::from_shakmaty)
+            .ok_or_else(|| MoveError("move must have an origin square".into()))?;
+        let to = uci
+            .to()
+            .map(Square::from_shakmaty)
+            .ok_or_else(|| MoveError("move must have a destination square".into()))?;
+        Ok(Self { from, to, uci })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Position {
-    squares: [Option<Piece>; 64],
-    side_to_move: Color,
+    inner: Chess,
 }
 
 impl Position {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
-        let mut fields = fen.split_whitespace();
-        let placement = fields.next().ok_or(FenError("missing piece placement"))?;
-        let side_to_move = match fields.next() {
-            Some("w") => Color::White,
-            Some("b") => Color::Black,
-            Some(_) => return Err(FenError("invalid side to move")),
-            None => return Err(FenError("missing side to move")),
-        };
-
-        let ranks: Vec<_> = placement.split('/').collect();
-        if ranks.len() != 8 {
-            return Err(FenError("piece placement must contain eight ranks"));
-        }
-
-        let mut squares = [None; 64];
-        for (fen_rank, contents) in ranks.into_iter().enumerate() {
-            let rank = 7 - fen_rank;
-            let mut file = 0;
-
-            for symbol in contents.chars() {
-                if let Some(empty) = symbol.to_digit(10) {
-                    if !(1..=8).contains(&empty) {
-                        return Err(FenError("invalid empty-square count"));
-                    }
-                    file += empty as usize;
-                } else {
-                    if file >= 8 {
-                        return Err(FenError("rank contains too many squares"));
-                    }
-                    squares[rank * 8 + file] = Some(piece_from_fen(symbol)?);
-                    file += 1;
-                }
-            }
-
-            if file != 8 {
-                return Err(FenError("rank must describe exactly eight squares"));
-            }
-        }
-
-        Ok(Self {
-            squares,
-            side_to_move,
-        })
+        let fen: Fen = fen
+            .parse()
+            .map_err(|error| FenError(format!("invalid FEN: {error}")))?;
+        let inner = fen
+            .into_position(CastlingMode::Standard)
+            .map_err(|error| FenError(format!("invalid chess position: {error}")))?;
+        Ok(Self { inner })
     }
 
     pub fn piece_at(&self, file: usize, rank: usize) -> Option<Piece> {
-        self.squares[rank * 8 + file]
+        self.inner
+            .board()
+            .piece_at(Square { file, rank }.to_shakmaty())
+            .map(piece_from_shakmaty)
     }
 
     pub fn side_to_move(&self) -> Color {
-        self.side_to_move
+        color_from_shakmaty(self.inner.turn())
+    }
+
+    pub fn legal_move(&self, from: Square, to: Square) -> Option<ChessMove> {
+        let mut fallback = None;
+        for chess_move in self.inner.legal_moves() {
+            let uci = UciMove::from_standard(chess_move);
+            if uci.from() == Some(from.to_shakmaty()) && uci.to() == Some(to.to_shakmaty()) {
+                let parsed = ChessMove::from_uci_move(uci).ok()?;
+                if uci.promotion() == Some(ShakmatyRole::Queen) {
+                    return Some(parsed);
+                }
+                fallback = Some(parsed);
+            }
+        }
+        fallback
     }
 
     pub fn apply_move(&mut self, chess_move: ChessMove) -> Result<(), MoveError> {
-        let Some(mut piece) = self.piece_at(chess_move.from.file, chess_move.from.rank) else {
-            return Err(MoveError("move starts on an empty square"));
-        };
-        if piece.color != self.side_to_move {
-            return Err(MoveError(
-                "moving piece does not belong to the side to move",
-            ));
-        }
-        if self
-            .piece_at(chess_move.to.file, chess_move.to.rank)
-            .is_some_and(|target| target.color == piece.color)
-        {
-            return Err(MoveError("move ends on a friendly piece"));
-        }
-
-        let en_passant_capture = if piece.role == Role::Pawn
-            && chess_move.from.file != chess_move.to.file
-            && self
-                .piece_at(chess_move.to.file, chess_move.to.rank)
-                .is_none()
-        {
-            let captured_rank = match piece.color {
-                Color::White => chess_move.to.rank.checked_sub(1),
-                Color::Black => chess_move.to.rank.checked_add(1).filter(|rank| *rank < 8),
-            }
-            .ok_or(MoveError("invalid en passant destination"))?;
-            let captured = self
-                .piece_at(chess_move.to.file, captured_rank)
-                .ok_or(MoveError("en passant move has no captured pawn"))?;
-            if captured.color == piece.color || captured.role != Role::Pawn {
-                return Err(MoveError(
-                    "en passant move does not capture an opposing pawn",
-                ));
-            }
-            Some(Square {
-                file: chess_move.to.file,
-                rank: captured_rank,
-            })
-        } else {
-            None
-        };
-
-        let castling_rook =
-            if piece.role == Role::King && chess_move.from.file.abs_diff(chess_move.to.file) == 2 {
-                let (rook_file, rook_destination) = if chess_move.to.file > chess_move.from.file {
-                    (7, 5)
-                } else {
-                    (0, 3)
-                };
-                let rook = self
-                    .piece_at(rook_file, chess_move.from.rank)
-                    .ok_or(MoveError("castling move has no rook"))?;
-                if rook.color != piece.color || rook.role != Role::Rook {
-                    return Err(MoveError("castling move has an invalid rook"));
-                }
-                Some((
-                    Square {
-                        file: rook_file,
-                        rank: chess_move.from.rank,
-                    },
-                    Square {
-                        file: rook_destination,
-                        rank: chess_move.from.rank,
-                    },
-                    rook,
-                ))
-            } else {
-                None
-            };
-
-        if let Some(promotion) = chess_move.promotion {
-            if piece.role != Role::Pawn || !matches!(chess_move.to.rank, 0 | 7) {
-                return Err(MoveError("only a pawn on its final rank can promote"));
-            }
-            piece.role = promotion;
-        } else if piece.role == Role::Pawn && matches!(chess_move.to.rank, 0 | 7) {
-            return Err(MoveError("pawn move to final rank requires promotion"));
-        }
-
-        self.set_piece(chess_move.from, None);
-        if let Some(captured) = en_passant_capture {
-            self.set_piece(captured, None);
-        }
-        if let Some((rook_from, rook_to, rook)) = castling_rook {
-            self.set_piece(rook_from, None);
-            self.set_piece(rook_to, Some(rook));
-        }
-        self.set_piece(chess_move.to, Some(piece));
-        self.side_to_move = self.side_to_move.opposite();
+        let legal_move = chess_move
+            .uci
+            .to_move(&self.inner)
+            .map_err(|error| MoveError(format!("illegal move: {error}")))?;
+        self.inner.play_unchecked(legal_move);
         Ok(())
-    }
-
-    fn set_piece(&mut self, square: Square, piece: Option<Piece>) {
-        self.squares[square.rank * 8 + square.file] = piece;
     }
 }
 
 #[derive(Debug)]
-pub struct FenError(&'static str);
+pub struct FenError(String);
 
 impl fmt::Display for FenError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(&self.0)
     }
 }
 
 #[derive(Debug)]
-pub struct MoveError(&'static str);
+pub struct MoveError(String);
 
 impl fmt::Display for MoveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(&self.0)
     }
 }
 
-fn piece_from_fen(symbol: char) -> Result<Piece, FenError> {
-    let color = if symbol.is_ascii_uppercase() {
-        Color::White
-    } else {
-        Color::Black
-    };
-    let role = match symbol.to_ascii_lowercase() {
-        'p' => Role::Pawn,
-        'n' => Role::Knight,
-        'b' => Role::Bishop,
-        'r' => Role::Rook,
-        'q' => Role::Queen,
-        'k' => Role::King,
-        _ => return Err(FenError("invalid piece symbol")),
-    };
+fn color_from_shakmaty(color: ShakmatyColor) -> Color {
+    match color {
+        ShakmatyColor::White => Color::White,
+        ShakmatyColor::Black => Color::Black,
+    }
+}
 
-    Ok(Piece { color, role })
+fn role_from_shakmaty(role: ShakmatyRole) -> Role {
+    match role {
+        ShakmatyRole::Pawn => Role::Pawn,
+        ShakmatyRole::Knight => Role::Knight,
+        ShakmatyRole::Bishop => Role::Bishop,
+        ShakmatyRole::Rook => Role::Rook,
+        ShakmatyRole::Queen => Role::Queen,
+        ShakmatyRole::King => Role::King,
+    }
+}
+
+fn piece_from_shakmaty(piece: shakmaty::Piece) -> Piece {
+    Piece {
+        color: color_from_shakmaty(piece.color),
+        role: role_from_shakmaty(piece.role),
+    }
 }
 
 #[cfg(test)]
@@ -343,8 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_promotions() {
-        let chess_move = ChessMove::from_uci("a7a8q").unwrap();
-        assert_eq!(chess_move.promotion, Some(Role::Queen));
+    fn finds_legal_moves_and_rejects_illegal_destinations() {
+        let position =
+            Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let legal = ChessMove::from_uci("e2e4").unwrap();
+        let illegal = ChessMove::from_uci("e2e5").unwrap();
+
+        assert_eq!(position.legal_move(legal.from, legal.to), Some(legal));
+        assert_eq!(position.legal_move(illegal.from, illegal.to), None);
     }
 }

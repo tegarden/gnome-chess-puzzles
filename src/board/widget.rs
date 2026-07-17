@@ -52,20 +52,9 @@ mod imp {
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let widget = self.obj();
-            let available = widget.width().min(widget.height()) as f32 - 2.0 * PADDING;
-            let board_size = available.clamp(0.0, MAXIMUM_SIZE);
-
-            if board_size == 0.0 {
+            let Some(geometry) = BoardGeometry::new(widget.width(), widget.height()) else {
                 return;
-            }
-
-            // The reference design uses a frame half as wide as a square.
-            let square_size = board_size / 9.0;
-            let frame_size = square_size / 2.0;
-            let board_x = (widget.width() as f32 - board_size) / 2.0;
-            let board_y = (widget.height() as f32 - board_size) / 2.0;
-            let squares_x = board_x + frame_size;
-            let squares_y = board_y + frame_size;
+            };
 
             let frame = gdk::RGBA::new(0.18, 0.20, 0.21, 1.0);
             let light_square = gdk::RGBA::new(0.93, 0.93, 0.92, 1.0);
@@ -74,7 +63,12 @@ mod imp {
 
             snapshot.append_color(
                 &frame,
-                &graphene::Rect::new(board_x, board_y, board_size, board_size),
+                &graphene::Rect::new(
+                    geometry.board_x,
+                    geometry.board_y,
+                    geometry.board_size,
+                    geometry.board_size,
+                ),
             );
 
             let perspective = self.perspective.get().unwrap_or(Color::White);
@@ -91,10 +85,10 @@ mod imp {
                     snapshot.append_color(
                         color,
                         &graphene::Rect::new(
-                            squares_x + file as f32 * square_size,
-                            squares_y + row as f32 * square_size,
-                            square_size,
-                            square_size,
+                            geometry.squares_x + file as f32 * geometry.square_size,
+                            geometry.squares_y + row as f32 * geometry.square_size,
+                            geometry.square_size,
+                            geometry.square_size,
                         ),
                     );
                 }
@@ -113,9 +107,9 @@ mod imp {
                     append_piece(
                         snapshot,
                         self.textures.texture(piece),
-                        squares_x,
-                        squares_y,
-                        square_size,
+                        geometry.squares_x,
+                        geometry.squares_y,
+                        geometry.square_size,
                         display_file,
                         display_row,
                     );
@@ -139,6 +133,16 @@ impl Board {
             .build();
         board.set_position(position);
         board.imp().perspective.set(Some(perspective));
+
+        let click = gtk::GestureClick::new();
+        let weak_board = board.downgrade();
+        click.connect_pressed(move |_, _, x, y| {
+            if let Some(board) = weak_board.upgrade() {
+                board.handle_click(x as f32, y as f32);
+            }
+        });
+        board.add_controller(click);
+
         board
     }
 
@@ -164,32 +168,148 @@ impl Board {
         self.imp().highlights.borrow_mut().clear();
         self.queue_draw();
     }
+
+    fn handle_click(&self, x: f32, y: f32) {
+        let Some(perspective) = self.imp().perspective.get() else {
+            return;
+        };
+        let Some(geometry) = BoardGeometry::new(self.width(), self.height()) else {
+            return;
+        };
+        let Some(square) = geometry.square_at(x, y, perspective) else {
+            return;
+        };
+
+        let origin = self.imp().highlights.borrow().selection;
+        let action = {
+            let position = self.imp().position.borrow();
+            let Some(position) = position.as_ref() else {
+                return;
+            };
+            user_action(position, perspective, origin, square)
+        };
+
+        match action {
+            UserAction::Select(square) => self.highlight_origin(square),
+            UserAction::Move(chess_move) => {
+                let moved = self
+                    .imp()
+                    .position
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|position| position.apply_move(chess_move).is_ok());
+                if moved {
+                    self.highlight_move(chess_move);
+                }
+            }
+            UserAction::Ignore => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UserAction {
+    Select(Square),
+    Move(ChessMove),
+    Ignore,
+}
+
+fn user_action(
+    position: &Position,
+    user_color: Color,
+    selected: Option<Square>,
+    clicked: Square,
+) -> UserAction {
+    if position.side_to_move() != user_color {
+        return UserAction::Ignore;
+    }
+
+    if position
+        .piece_at(clicked.file(), clicked.rank())
+        .is_some_and(|piece| piece.color == user_color)
+    {
+        return UserAction::Select(clicked);
+    }
+
+    selected
+        .and_then(|from| position.legal_move(from, clicked))
+        .map_or(UserAction::Ignore, UserAction::Move)
+}
+
+#[derive(Clone, Copy)]
+struct BoardGeometry {
+    board_x: f32,
+    board_y: f32,
+    board_size: f32,
+    squares_x: f32,
+    squares_y: f32,
+    square_size: f32,
+}
+
+impl BoardGeometry {
+    fn new(width: i32, height: i32) -> Option<Self> {
+        let available = width.min(height) as f32 - 2.0 * PADDING;
+        let board_size = available.clamp(0.0, MAXIMUM_SIZE);
+        if board_size == 0.0 {
+            return None;
+        }
+
+        // The reference design uses a frame half as wide as a square.
+        let square_size = board_size / 9.0;
+        let frame_size = square_size / 2.0;
+        let board_x = (width as f32 - board_size) / 2.0;
+        let board_y = (height as f32 - board_size) / 2.0;
+        Some(Self {
+            board_x,
+            board_y,
+            board_size,
+            squares_x: board_x + frame_size,
+            squares_y: board_y + frame_size,
+            square_size,
+        })
+    }
+
+    fn square_at(self, x: f32, y: f32, perspective: Color) -> Option<Square> {
+        let display_file = ((x - self.squares_x) / self.square_size).floor() as isize;
+        let display_row = ((y - self.squares_y) / self.square_size).floor() as isize;
+        if !(0..8).contains(&display_file) || !(0..8).contains(&display_row) {
+            return None;
+        }
+
+        let (file, rank) = match perspective {
+            Color::White => (display_file as usize, 7 - display_row as usize),
+            Color::Black => (7 - display_file as usize, display_row as usize),
+        };
+        Square::from_coords(file, rank)
+    }
 }
 
 #[derive(Default)]
 struct Highlights {
     origin: Option<Square>,
     destination: Option<Square>,
+    selection: Option<Square>,
 }
 
 impl Highlights {
     fn select_origin(&mut self, square: Square) {
-        self.origin = Some(square);
-        self.destination = None;
+        self.selection = Some(square);
     }
 
     fn show_move(&mut self, from: Square, to: Square) {
         self.origin = Some(from);
         self.destination = Some(to);
+        self.selection = None;
     }
 
     fn clear(&mut self) {
         self.origin = None;
         self.destination = None;
+        self.selection = None;
     }
 
     fn contains_display(&self, file: usize, row: usize, perspective: Color) -> bool {
-        [self.origin, self.destination]
+        [self.origin, self.destination, self.selection]
             .into_iter()
             .flatten()
             .any(|square| {
@@ -291,8 +411,23 @@ mod tests {
         highlights.select_origin(first.from);
         highlights.select_origin(second.from);
 
-        assert_eq!(highlights.origin, Some(second.from));
+        assert_eq!(highlights.selection, Some(second.from));
+        assert_eq!(highlights.origin, None);
         assert_eq!(highlights.destination, None);
+    }
+
+    #[test]
+    fn selecting_a_piece_preserves_the_opponents_move_highlights() {
+        let opponent_move = ChessMove::from_uci("g8f6").unwrap();
+        let selection = ChessMove::from_uci("e2e4").unwrap().from;
+        let mut highlights = Highlights::default();
+
+        highlights.show_move(opponent_move.from, opponent_move.to);
+        highlights.select_origin(selection);
+
+        assert_eq!(highlights.origin, Some(opponent_move.from));
+        assert_eq!(highlights.destination, Some(opponent_move.to));
+        assert_eq!(highlights.selection, Some(selection));
     }
 
     #[test]
@@ -306,5 +441,62 @@ mod tests {
 
         assert_eq!(highlights.origin, Some(second.from));
         assert_eq!(highlights.destination, Some(second.to));
+        assert_eq!(highlights.selection, None);
+    }
+
+    #[test]
+    fn click_coordinates_follow_the_board_perspective() {
+        let geometry = BoardGeometry::new(640, 640).unwrap();
+        let x = geometry.squares_x + geometry.square_size / 2.0;
+        let y = geometry.squares_y + 7.0 * geometry.square_size + geometry.square_size / 2.0;
+
+        assert_eq!(
+            geometry.square_at(x, y, Color::White),
+            Square::from_coords(0, 0)
+        );
+        assert_eq!(
+            geometry.square_at(x, y, Color::Black),
+            Square::from_coords(7, 7)
+        );
+    }
+
+    #[test]
+    fn user_can_select_change_and_complete_a_legal_move() {
+        let mut position =
+            Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let e2e4 = ChessMove::from_uci("e2e4").unwrap();
+        let d2d4 = ChessMove::from_uci("d2d4").unwrap();
+
+        assert_eq!(
+            user_action(&position, Color::White, None, e2e4.from),
+            UserAction::Select(e2e4.from)
+        );
+        assert_eq!(
+            user_action(&position, Color::White, Some(e2e4.from), d2d4.from),
+            UserAction::Select(d2d4.from)
+        );
+        assert_eq!(
+            user_action(&position, Color::White, Some(e2e4.from), e2e4.to),
+            UserAction::Move(e2e4)
+        );
+
+        position.apply_move(e2e4).unwrap();
+        assert_eq!(
+            user_action(&position, Color::White, Some(e2e4.to), d2d4.from),
+            UserAction::Ignore
+        );
+    }
+
+    #[test]
+    fn invalid_destination_keeps_the_current_selection() {
+        let position =
+            Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let origin = ChessMove::from_uci("e2e4").unwrap().from;
+        let invalid_destination = ChessMove::from_uci("e2e5").unwrap().to;
+
+        assert_eq!(
+            user_action(&position, Color::White, Some(origin), invalid_destination),
+            UserAction::Ignore
+        );
     }
 }
