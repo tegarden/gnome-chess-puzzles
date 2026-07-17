@@ -1,2 +1,4 @@
 __pycache__/
+/build/
 /data/lichess_db_puzzle.csv.zst
+/target/

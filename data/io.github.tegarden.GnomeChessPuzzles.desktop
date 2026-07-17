@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Gnome Chess Puzzles
+Comment=Practice chess with tactical puzzles
+Exec=gnome-chess-puzzles
+Terminal=false
+Type=Application
+Categories=Game;BoardGame;
+StartupNotify=true
+

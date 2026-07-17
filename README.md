@@ -1,3 +1,17 @@
+## Building and running
+
+The application requires Rust, Meson, GTK 4, and libadwaita 1.8 or newer.
+Configure and build it with:
+
+```sh
+meson setup build
+meson compile -C build
+./build/gnome-chess-puzzles
+```
+
+Close the window or press <kbd>Ctrl</kbd>+<kbd>Q</kbd> to exit. For a release
+build, configure with `meson setup build --buildtype=release`.
+
 ## Proposed architecture
 
 ```
@@ -446,4 +460,3 @@ Defer these until later:
 -   Arbitrary PGN analysis
 -   Multiple engines
 -   Puzzle races or timers
-
