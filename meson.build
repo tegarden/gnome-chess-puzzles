@@ -11,6 +11,7 @@ dependency('libadwaita-1', version: '>= 1.8')
 
 cargo = find_program('cargo')
 cargo_build = find_program('build-aux/cargo-build.sh')
+application_data_dir = get_option('prefix') / get_option('datadir') / 'gnome-chess-puzzles'
 
 custom_target(
   'gnome-chess-puzzles',
@@ -21,6 +22,7 @@ custom_target(
     meson.project_build_root() / 'target',
     get_option('buildtype'),
     '@OUTPUT@',
+    application_data_dir,
   ],
   build_by_default: true,
   build_always_stale: true,
@@ -31,4 +33,9 @@ custom_target(
 install_data(
   'data/io.github.tegarden.GnomeChessPuzzles.desktop',
   install_dir: get_option('datadir') / 'applications',
+)
+
+install_data(
+  'data/puzzles.sqlite',
+  install_dir: application_data_dir,
 )

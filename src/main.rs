@@ -1,6 +1,7 @@
 use adw::prelude::*;
 
 mod board;
+mod puzzle;
 
 const APPLICATION_ID: &str = "io.github.tegarden.GnomeChessPuzzles";
 const APPLICATION_NAME: &str = "Gnome Chess Puzzles";
@@ -60,10 +61,38 @@ fn build_ui(application: &adw::Application) {
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header_bar);
-    toolbar_view.set_content(Some(&board::Board::new()));
+    match load_board() {
+        Ok(board) => {
+            toolbar_view.set_content(Some(&board));
+        }
+        Err(error) => {
+            let error_page = adw::StatusPage::builder()
+                .icon_name("dialog-error-symbolic")
+                .title("Unable to Load Puzzle")
+                .description(error.to_string())
+                .build();
+            toolbar_view.set_content(Some(&error_page));
+        }
+    }
     window.set_content(Some(&toolbar_view));
 
     window.present();
+}
+
+fn load_board() -> Result<board::Board, String> {
+    let puzzle::Puzzle {
+        id,
+        mut initial_fen,
+        setup_move,
+    } = puzzle::load_placeholder().map_err(|error| error.to_string())?;
+
+    initial_fen
+        .apply_move(setup_move)
+        .map_err(|error| format!("could not apply setup move for puzzle {id}: {error}"))?;
+    let user_color = initial_fen.side_to_move();
+    let board = board::Board::new(initial_fen, user_color);
+    board.highlight_move(setup_move);
+    Ok(board)
 }
 
 fn show_about_dialog(application: &adw::Application) {
