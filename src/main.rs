@@ -5,6 +5,7 @@ use std::time::Duration;
 use adw::prelude::*;
 
 mod board;
+mod history;
 mod move_list;
 mod puzzle;
 
@@ -29,7 +30,10 @@ fn main() -> adw::glib::ExitCode {
     let about = adw::gio::ActionEntry::builder("about")
         .activate(|application: &adw::Application, _, _| show_about_dialog(application))
         .build();
-    application.add_action_entries([quit, about]);
+    let history = adw::gio::ActionEntry::builder("history")
+        .activate(|application: &adw::Application, _, _| history::show_window(application))
+        .build();
+    application.add_action_entries([quit, history, about]);
 
     application.run()
 }
@@ -50,6 +54,7 @@ fn build_ui(application: &adw::Application) {
     let title = adw::WindowTitle::builder().title(WINDOW_TITLE).build();
 
     let primary_menu = adw::gio::Menu::new();
+    primary_menu.append(Some("History"), Some("app.history"));
     primary_menu.append(Some("About Chess Puzzles"), Some("app.about"));
 
     let menu_button = adw::gtk::MenuButton::builder()
@@ -190,6 +195,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let retry_button_for_move = retry_button.clone();
     let show_answer_button_for_move = show_answer_button.clone();
     let move_list_for_move = move_list.clone();
+    let puzzle_id_for_move = id.clone();
     board.connect_user_move(move |user_move| {
         let Some(board) = weak_board.upgrade() else {
             return;
@@ -253,6 +259,11 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         if waiting_for_opponent {
             show_answer_button_for_move.set_sensitive(false);
         }
+        if let Some(result) = session_for_move.borrow().progress().terminal_state()
+            && let Err(error) = history::record(&puzzle_id_for_move, rating, result)
+        {
+            eprintln!("could not record completed puzzle: {error}");
+        }
     });
 
     let weak_board = board.downgrade();
@@ -289,6 +300,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let progress_text_for_answer = progress_text.clone();
     let retry_button_weak = retry_button.downgrade();
     let move_list_for_answer = move_list.clone();
+    let puzzle_id_for_answer = id.clone();
     show_answer_button.connect_clicked(move |show_answer_button| {
         let Some(board) = weak_board.upgrade() else {
             return;
@@ -303,6 +315,11 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
 
         board.set_input_enabled(false);
         play_answer_steps(&board, &move_list_for_answer, answer_steps);
+        if let Err(error) =
+            history::record(&puzzle_id_for_answer, rating, puzzle::TerminalState::Failed)
+        {
+            eprintln!("could not record completed puzzle: {error}");
+        }
         if let Some(retry_button) = retry_button_weak.upgrade() {
             update_progress_controls(
                 session_for_answer.borrow().progress(),
