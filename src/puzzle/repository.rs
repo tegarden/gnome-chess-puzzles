@@ -11,6 +11,7 @@ const DATA_DIR_ENVIRONMENT_VARIABLE: &str = "GNOME_CHESS_PUZZLES_DATA_DIR";
 
 pub struct Puzzle {
     pub id: String,
+    pub rating: u16,
     pub initial_fen: Position,
     pub setup_move: ChessMove,
 }
@@ -25,13 +26,17 @@ pub fn load_placeholder() -> Result<Puzzle, LoadError> {
             ))
         })?;
 
-    let (id, fen, moves): (String, String, String) = database
+    let (id, fen, moves, rating): (String, String, String, i64) = database
         .query_row(
-            "SELECT id, fen, moves FROM puzzle ORDER BY id LIMIT 1",
+            "SELECT id, fen, moves, rating FROM puzzle ORDER BY id LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|error| LoadError(format!("could not select a puzzle: {error}")))?;
+
+    let rating = rating
+        .try_into()
+        .map_err(|_| LoadError(format!("puzzle {id} has an invalid rating: {rating}")))?;
 
     let initial_fen = Position::from_fen(&fen)
         .map_err(|error| LoadError(format!("puzzle {id} has an invalid FEN: {error}")))?;
@@ -47,6 +52,7 @@ pub fn load_placeholder() -> Result<Puzzle, LoadError> {
 
     Ok(Puzzle {
         id,
+        rating,
         initial_fen,
         setup_move,
     })
