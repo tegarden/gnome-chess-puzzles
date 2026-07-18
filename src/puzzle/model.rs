@@ -1,6 +1,7 @@
 use std::fmt;
 
 use shakmaty::fen::Fen;
+use shakmaty::san::SanPlus;
 use shakmaty::uci::UciMove;
 use shakmaty::{
     CastlingMode, Chess, Color as ShakmatyColor, File, Position as ShakmatyPosition, Rank,
@@ -138,6 +139,14 @@ impl Position {
         self.inner.play_unchecked(legal_move);
         Ok(())
     }
+
+    pub fn algebraic(&self, chess_move: ChessMove) -> Result<String, MoveError> {
+        let legal_move = chess_move
+            .uci
+            .to_move(&self.inner)
+            .map_err(|error| MoveError(format!("illegal move: {error}")))?;
+        Ok(SanPlus::from_move(self.inner.clone(), legal_move).to_string())
+    }
 }
 
 #[derive(Debug)]
@@ -243,5 +252,18 @@ mod tests {
 
         assert_eq!(position.legal_move(legal.from, legal.to), Some(legal));
         assert_eq!(position.legal_move(illegal.from, illegal.to), None);
+    }
+
+    #[test]
+    fn formats_moves_in_standard_algebraic_notation() {
+        let position =
+            Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+
+        assert_eq!(
+            position
+                .algebraic(ChessMove::from_uci("g1f3").unwrap())
+                .unwrap(),
+            "Nf3"
+        );
     }
 }

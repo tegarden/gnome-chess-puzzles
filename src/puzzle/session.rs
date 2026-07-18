@@ -43,15 +43,28 @@ impl Progress {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MoveOutcome {
-    Incorrect,
-    Correct { opponent_move: Option<ChessMove> },
+    Incorrect {
+        user_move: NotatedMove,
+    },
+    Correct {
+        user_move: NotatedMove,
+        opponent_move: Option<NotatedMove>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotatedMove {
+    pub chess_move: ChessMove,
+    pub color: super::Color,
+    pub algebraic: String,
+    pub ply: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct AnswerStep {
-    pub chess_move: ChessMove,
+    pub played_move: NotatedMove,
     pub position: Position,
 }
 
@@ -63,6 +76,7 @@ pub struct PuzzleSession {
     progress: Progress,
     retry_position: Option<Position>,
     last_opponent_move: ChessMove,
+    setup_move: NotatedMove,
 }
 
 impl PuzzleSession {
@@ -76,8 +90,16 @@ impl PuzzleSession {
                 "a puzzle solution must contain an odd number of moves".into(),
             ));
         }
+        let setup_move = NotatedMove {
+            chess_move: setup_move,
+            color: initial_position.side_to_move(),
+            algebraic: initial_position
+                .algebraic(setup_move)
+                .map_err(|error| SessionError(format!("could not format setup move: {error}")))?,
+            ply: 0,
+        };
         initial_position
-            .apply_move(setup_move)
+            .apply_move(setup_move.chess_move)
             .map_err(|error| SessionError(format!("could not apply setup move: {error}")))?;
 
         Ok(Self {
@@ -87,7 +109,8 @@ impl PuzzleSession {
             made_mistake: false,
             progress: Progress::InProgress,
             retry_position: None,
-            last_opponent_move: setup_move,
+            last_opponent_move: setup_move.chess_move,
+            setup_move,
         })
     }
 
@@ -103,6 +126,14 @@ impl PuzzleSession {
         self.last_opponent_move
     }
 
+    pub fn setup_move(&self) -> &NotatedMove {
+        &self.setup_move
+    }
+
+    pub fn total_plies(&self) -> usize {
+        self.solution.len() + 1
+    }
+
     pub fn play_user_move(&mut self, user_move: ChessMove) -> Result<MoveOutcome, SessionError> {
         if self.progress != Progress::InProgress {
             return Err(SessionError(
@@ -111,15 +142,24 @@ impl PuzzleSession {
         }
 
         let position_before_move = self.position.clone();
+        let user_move = NotatedMove {
+            chess_move: user_move,
+            color: self.position.side_to_move(),
+            algebraic: self
+                .position
+                .algebraic(user_move)
+                .map_err(|error| SessionError(format!("could not format user move: {error}")))?,
+            ply: self.next_move + 1,
+        };
         self.position
-            .apply_move(user_move)
+            .apply_move(user_move.chess_move)
             .map_err(|error| SessionError(format!("could not apply user move: {error}")))?;
 
-        if self.solution.get(self.next_move) != Some(&user_move) {
+        if self.solution.get(self.next_move) != Some(&user_move.chess_move) {
             self.made_mistake = true;
             self.progress = Progress::Incorrect;
             self.retry_position = Some(position_before_move);
-            return Ok(MoveOutcome::Incorrect);
+            return Ok(MoveOutcome::Incorrect { user_move });
         }
 
         self.next_move += 1;
@@ -130,18 +170,31 @@ impl PuzzleSession {
                 TerminalState::Succeeded
             });
             return Ok(MoveOutcome::Correct {
+                user_move,
                 opponent_move: None,
             });
         }
 
-        let opponent_move = self.solution[self.next_move];
+        let opponent_chess_move = self.solution[self.next_move];
+        let opponent_move = NotatedMove {
+            chess_move: opponent_chess_move,
+            color: self.position.side_to_move(),
+            algebraic: self
+                .position
+                .algebraic(opponent_chess_move)
+                .map_err(|error| {
+                    SessionError(format!("could not format opponent move: {error}"))
+                })?,
+            ply: self.next_move + 1,
+        };
         self.position
-            .apply_move(opponent_move)
+            .apply_move(opponent_move.chess_move)
             .map_err(|error| SessionError(format!("could not apply opponent move: {error}")))?;
         self.next_move += 1;
-        self.last_opponent_move = opponent_move;
+        self.last_opponent_move = opponent_move.chess_move;
 
         Ok(MoveOutcome::Correct {
+            user_move,
             opponent_move: Some(opponent_move),
         })
     }
@@ -180,11 +233,19 @@ impl PuzzleSession {
 
         let mut steps = Vec::with_capacity(remaining_moves.len());
         for answer_move in remaining_moves {
+            let played_move = NotatedMove {
+                chess_move: *answer_move,
+                color: answer_position.side_to_move(),
+                algebraic: answer_position.algebraic(*answer_move).map_err(|error| {
+                    SessionError(format!("could not format answer move: {error}"))
+                })?,
+                ply: steps.len() + self.next_move + 1,
+            };
             answer_position
                 .apply_move(*answer_move)
                 .map_err(|error| SessionError(format!("could not apply answer move: {error}")))?;
             steps.push(AnswerStep {
-                chess_move: *answer_move,
+                played_move,
                 position: answer_position.clone(),
             });
         }
@@ -230,14 +291,18 @@ mod tests {
     fn correct_moves_apply_the_opponent_reply_and_complete_the_puzzle() {
         let mut session = session(&["g1f3", "b8c6", "d2d4"]);
 
-        assert_eq!(
-            session
-                .play_user_move(ChessMove::from_uci("g1f3").unwrap())
-                .unwrap(),
-            MoveOutcome::Correct {
-                opponent_move: Some(ChessMove::from_uci("b8c6").unwrap())
-            }
-        );
+        let outcome = session
+            .play_user_move(ChessMove::from_uci("g1f3").unwrap())
+            .unwrap();
+        let MoveOutcome::Correct {
+            user_move,
+            opponent_move: Some(opponent_move),
+        } = outcome
+        else {
+            panic!("expected a correct move with an opponent reply");
+        };
+        assert_eq!(user_move.algebraic, "Nf3");
+        assert_eq!(opponent_move.algebraic, "Nc6");
         assert_eq!(session.progress(), Progress::InProgress);
         assert_eq!(
             session.position().piece_at(2, 5),
@@ -261,12 +326,10 @@ mod tests {
         let mut session = session(&["g1f3"]);
         let before_mistake = session.position().clone();
 
-        assert_eq!(
-            session
-                .play_user_move(ChessMove::from_uci("b1c3").unwrap())
-                .unwrap(),
-            MoveOutcome::Incorrect
-        );
+        let outcome = session
+            .play_user_move(ChessMove::from_uci("b1c3").unwrap())
+            .unwrap();
+        assert!(matches!(outcome, MoveOutcome::Incorrect { .. }));
         assert_eq!(session.progress(), Progress::Incorrect);
         assert!(session.retry());
         assert_eq!(
@@ -289,9 +352,21 @@ mod tests {
 
         let steps = session.show_answer().unwrap();
         assert_eq!(steps.len(), 3);
-        assert_eq!(steps[0].chess_move, ChessMove::from_uci("g1f3").unwrap());
-        assert_eq!(steps[1].chess_move, ChessMove::from_uci("b8c6").unwrap());
-        assert_eq!(steps[2].chess_move, ChessMove::from_uci("d2d4").unwrap());
+        assert_eq!(
+            steps[0].played_move.chess_move,
+            ChessMove::from_uci("g1f3").unwrap()
+        );
+        assert_eq!(steps[0].played_move.algebraic, "Nf3");
+        assert_eq!(
+            steps[1].played_move.chess_move,
+            ChessMove::from_uci("b8c6").unwrap()
+        );
+        assert_eq!(steps[1].played_move.algebraic, "Nc6");
+        assert_eq!(
+            steps[2].played_move.chess_move,
+            ChessMove::from_uci("d2d4").unwrap()
+        );
+        assert_eq!(steps[2].played_move.algebraic, "d4");
         assert_eq!(steps[0].position.piece_at(6, 0), None);
         assert_eq!(
             steps[1].position.piece_at(2, 5),

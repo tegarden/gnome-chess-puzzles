@@ -5,6 +5,7 @@ use std::time::Duration;
 use adw::prelude::*;
 
 mod board;
+mod move_list;
 mod puzzle;
 
 const APPLICATION_ID: &str = "io.github.tegarden.GnomeChessPuzzles";
@@ -120,6 +121,8 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let session = puzzle::PuzzleSession::new(initial_fen, setup_move, solution)
         .map_err(|error| format!("could not start puzzle {id}: {error}"))?;
     let user_color = session.position().side_to_move();
+    let move_list = move_list::MoveList::new(user_color, session.total_plies());
+    let setup_notated_move = session.setup_move().clone();
     let board = board::Board::new(board_initial_position, user_color);
     board.set_input_enabled(false);
     let session = Rc::new(RefCell::new(session));
@@ -147,6 +150,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     feedback_content.set_margin_end(18);
     feedback_content.append(&heading);
     feedback_content.append(&side_to_move);
+    feedback_content.append(move_list.widget());
 
     let feedback_spacer = adw::gtk::Box::new(adw::gtk::Orientation::Vertical, 0);
     feedback_spacer.set_vexpand(true);
@@ -185,6 +189,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let progress_text_for_move = progress_text.clone();
     let retry_button_for_move = retry_button.clone();
     let show_answer_button_for_move = show_answer_button.clone();
+    let move_list_for_move = move_list.clone();
     board.connect_user_move(move |user_move| {
         let Some(board) = weak_board.upgrade() else {
             return;
@@ -199,23 +204,28 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         };
 
         let waiting_for_opponent = match outcome {
-            puzzle::MoveOutcome::Incorrect => {
+            puzzle::MoveOutcome::Incorrect { user_move } => {
+                move_list_for_move.show_incorrect_move(&user_move);
                 board.set_input_enabled(false);
                 false
             }
             puzzle::MoveOutcome::Correct {
+                user_move,
                 opponent_move: Some(opponent_move),
             } => {
+                move_list_for_move.show_move(&user_move);
                 let opponent_position = session_for_move.borrow().position().clone();
                 board.set_input_enabled(false);
                 let weak_board = board.downgrade();
                 let show_answer_button_weak = show_answer_button_for_move.downgrade();
+                let move_list = move_list_for_move.clone();
                 adw::glib::timeout_add_local_once(MOVE_PLAYBACK_DELAY, move || {
                     let Some(board) = weak_board.upgrade() else {
                         return;
                     };
                     board.set_position(opponent_position);
-                    board.highlight_move(opponent_move);
+                    board.highlight_move(opponent_move.chess_move);
+                    move_list.show_move(&opponent_move);
                     board.set_input_enabled(true);
                     if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
                         show_answer_button.set_sensitive(true);
@@ -224,8 +234,10 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
                 true
             }
             puzzle::MoveOutcome::Correct {
+                user_move,
                 opponent_move: None,
             } => {
+                move_list_for_move.show_move(&user_move);
                 board.set_input_enabled(false);
                 false
             }
@@ -247,6 +259,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let session_for_retry = Rc::clone(&session);
     let progress_text_for_retry = progress_text.clone();
     let show_answer_button_weak = show_answer_button.downgrade();
+    let move_list_for_retry = move_list.clone();
     retry_button.connect_clicked(move |retry_button| {
         let Some(board) = weak_board.upgrade() else {
             return;
@@ -258,6 +271,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         let session = session_for_retry.borrow();
         board.set_position(session.position().clone());
         board.highlight_move(session.last_opponent_move());
+        move_list_for_retry.clear_incorrect_move();
         board.set_input_enabled(true);
         if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
             update_progress_controls(
@@ -274,6 +288,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let session_for_answer = Rc::clone(&session);
     let progress_text_for_answer = progress_text.clone();
     let retry_button_weak = retry_button.downgrade();
+    let move_list_for_answer = move_list.clone();
     show_answer_button.connect_clicked(move |show_answer_button| {
         let Some(board) = weak_board.upgrade() else {
             return;
@@ -287,7 +302,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         };
 
         board.set_input_enabled(false);
-        play_answer_steps(&board, answer_steps);
+        play_answer_steps(&board, &move_list_for_answer, answer_steps);
         if let Some(retry_button) = retry_button_weak.upgrade() {
             update_progress_controls(
                 session_for_answer.borrow().progress(),
@@ -316,12 +331,14 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let setup_position = session.borrow().position().clone();
     let weak_board = board.downgrade();
     let show_answer_button_weak = show_answer_button.downgrade();
+    let move_list_for_setup = move_list.clone();
     adw::glib::timeout_add_local_once(MOVE_PLAYBACK_DELAY, move || {
         let Some(board) = weak_board.upgrade() else {
             return;
         };
         board.set_position(setup_position);
         board.highlight_move(setup_move);
+        move_list_for_setup.show_move(&setup_notated_move);
         board.set_input_enabled(true);
         if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
             show_answer_button.set_sensitive(true);
@@ -334,9 +351,14 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     })
 }
 
-fn play_answer_steps(board: &board::Board, steps: Vec<puzzle::AnswerStep>) {
+fn play_answer_steps(
+    board: &board::Board,
+    move_list: &move_list::MoveList,
+    steps: Vec<puzzle::AnswerStep>,
+) {
     for (index, step) in steps.into_iter().enumerate() {
         let weak_board = board.downgrade();
+        let move_list = move_list.clone();
         let delay =
             Duration::from_millis(MOVE_PLAYBACK_DELAY.as_millis() as u64 * (index as u64 + 1));
         adw::glib::timeout_add_local_once(delay, move || {
@@ -344,7 +366,8 @@ fn play_answer_steps(board: &board::Board, steps: Vec<puzzle::AnswerStep>) {
                 return;
             };
             board.set_position(step.position);
-            board.highlight_move(step.chess_move);
+            board.highlight_move(step.played_move.chess_move);
+            move_list.show_move(&step.played_move);
         });
     }
 }
