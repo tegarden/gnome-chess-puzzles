@@ -25,6 +25,26 @@ const NATURAL_SIZE: i32 = 640;
 const MAXIMUM_SIZE: f32 = 720.0;
 const PADDING: f32 = 24.0;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BorderState {
+    #[default]
+    InProgress,
+    Succeeded,
+    SucceededAfterRetry,
+    Failed,
+}
+
+impl BorderState {
+    fn color(self) -> gdk::RGBA {
+        match self {
+            Self::InProgress => gdk::RGBA::new(0.18, 0.20, 0.21, 1.0),
+            Self::Succeeded => gdk::RGBA::new(0.20, 0.55, 0.28, 1.0),
+            Self::SucceededAfterRetry => gdk::RGBA::new(0.78, 0.52, 0.08, 1.0),
+            Self::Failed => gdk::RGBA::new(0.72, 0.16, 0.19, 1.0),
+        }
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -32,6 +52,9 @@ mod imp {
     pub struct Board {
         pub(super) position: RefCell<Option<Position>>,
         pub(super) perspective: Cell<Option<Color>>,
+        pub(super) input_enabled: Cell<bool>,
+        pub(super) border_state: Cell<BorderState>,
+        pub(super) user_move_handlers: RefCell<Vec<Box<dyn Fn(ChessMove)>>>,
         pub(super) highlights: RefCell<Highlights>,
         pub(super) textures: PieceTextures,
     }
@@ -56,7 +79,7 @@ mod imp {
                 return;
             };
 
-            let frame = gdk::RGBA::new(0.18, 0.20, 0.21, 1.0);
+            let frame = self.border_state.get().color();
             let light_square = gdk::RGBA::new(0.93, 0.93, 0.92, 1.0);
             let dark_square = gdk::RGBA::new(0.73, 0.75, 0.72, 1.0);
             let highlighted_square = gdk::RGBA::new(0.96, 0.76, 0.18, 1.0);
@@ -133,6 +156,7 @@ impl Board {
             .build();
         board.set_position(position);
         board.imp().perspective.set(Some(perspective));
+        board.imp().input_enabled.set(true);
 
         let click = gtk::GestureClick::new();
         let weak_board = board.downgrade();
@@ -169,7 +193,27 @@ impl Board {
         self.queue_draw();
     }
 
+    pub fn set_input_enabled(&self, enabled: bool) {
+        self.imp().input_enabled.set(enabled);
+    }
+
+    pub fn set_border_state(&self, state: BorderState) {
+        if self.imp().border_state.replace(state) != state {
+            self.queue_draw();
+        }
+    }
+
+    pub fn connect_user_move<F: Fn(ChessMove) + 'static>(&self, handler: F) {
+        self.imp()
+            .user_move_handlers
+            .borrow_mut()
+            .push(Box::new(handler));
+    }
+
     fn handle_click(&self, x: f32, y: f32) {
+        if !self.imp().input_enabled.get() {
+            return;
+        }
         let Some(perspective) = self.imp().perspective.get() else {
             return;
         };
@@ -200,6 +244,9 @@ impl Board {
                     .is_some_and(|position| position.apply_move(chess_move).is_ok());
                 if moved {
                     self.highlight_move(chess_move);
+                    for handler in self.imp().user_move_handlers.borrow().iter() {
+                        handler(chess_move);
+                    }
                 }
             }
             UserAction::Ignore => {}
@@ -394,6 +441,20 @@ mod tests {
     fn white_has_rank_one_at_bottom() {
         assert_eq!(display_coordinates(0, 0, Color::White), (0, 7));
         assert_eq!(display_coordinates(7, 7, Color::White), (7, 0));
+    }
+
+    #[test]
+    fn terminal_border_colors_are_distinct_from_in_progress() {
+        let in_progress = BorderState::InProgress.color();
+
+        assert_ne!(BorderState::Succeeded.color(), in_progress);
+        assert_ne!(BorderState::SucceededAfterRetry.color(), in_progress);
+        assert_ne!(BorderState::Failed.color(), in_progress);
+        assert_ne!(
+            BorderState::Succeeded.color(),
+            BorderState::SucceededAfterRetry.color()
+        );
+        assert_ne!(BorderState::Succeeded.color(), BorderState::Failed.color());
     }
 
     #[test]

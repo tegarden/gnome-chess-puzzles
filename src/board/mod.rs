@@ -1,3 +1,3 @@
 mod widget;
 
-pub use widget::Board;
+pub use widget::{Board, BorderState};

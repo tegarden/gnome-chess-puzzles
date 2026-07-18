@@ -2,21 +2,23 @@ use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use super::{ChessMove, Position};
 
 const DATABASE_FILE: &str = "puzzles.sqlite";
 const DATA_DIR_ENVIRONMENT_VARIABLE: &str = "GNOME_CHESS_PUZZLES_DATA_DIR";
+type PuzzleRow = (String, String, String, i64);
 
 pub struct Puzzle {
     pub id: String,
     pub rating: u16,
     pub initial_fen: Position,
     pub setup_move: ChessMove,
+    pub solution: Vec<ChessMove>,
 }
 
-pub fn load_placeholder() -> Result<Puzzle, LoadError> {
+pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
     let database_path = database_path();
     let database = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| {
@@ -26,12 +28,7 @@ pub fn load_placeholder() -> Result<Puzzle, LoadError> {
             ))
         })?;
 
-    let (id, fen, moves, rating): (String, String, String, i64) = database
-        .query_row(
-            "SELECT id, fen, moves, rating FROM puzzle ORDER BY id LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
+    let (id, fen, moves, rating) = select_next_record(&database, after_id)
         .map_err(|error| LoadError(format!("could not select a puzzle: {error}")))?;
 
     let rating = rating
@@ -40,22 +37,61 @@ pub fn load_placeholder() -> Result<Puzzle, LoadError> {
 
     let initial_fen = Position::from_fen(&fen)
         .map_err(|error| LoadError(format!("puzzle {id} has an invalid FEN: {error}")))?;
+    let mut moves = moves.split_whitespace().map(|value| {
+        ChessMove::from_uci(value)
+            .map_err(|error| LoadError(format!("puzzle {id} has an invalid move {value}: {error}")))
+    });
     let setup_move = moves
-        .split_whitespace()
         .next()
-        .ok_or_else(|| LoadError(format!("puzzle {id} has no setup move")))
-        .and_then(|setup_move| {
-            ChessMove::from_uci(setup_move).map_err(|error| {
-                LoadError(format!("puzzle {id} has an invalid setup move: {error}"))
-            })
-        })?;
+        .ok_or_else(|| LoadError(format!("puzzle {id} has no setup move")))??;
+    let solution = moves.collect::<Result<Vec<_>, _>>()?;
+    if solution.is_empty() {
+        return Err(LoadError(format!("puzzle {id} has no solution moves")));
+    }
 
     Ok(Puzzle {
         id,
         rating,
         initial_fen,
         setup_move,
+        solution,
     })
+}
+
+fn select_next_record(
+    database: &Connection,
+    after_id: Option<&str>,
+) -> rusqlite::Result<PuzzleRow> {
+    let next_record = after_id
+        .map(|id| {
+            database
+                .query_row(
+                    "SELECT id, fen, moves, rating
+                     FROM puzzle
+                     WHERE id > ?1
+                     ORDER BY id
+                     LIMIT 1",
+                    params![id],
+                    read_puzzle_row,
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
+
+    // Starting up, and advancing past the final ID, both select the first puzzle.
+    if let Some(record) = next_record {
+        return Ok(record);
+    }
+    database.query_row(
+        "SELECT id, fen, moves, rating FROM puzzle ORDER BY id LIMIT 1",
+        [],
+        read_puzzle_row,
+    )
+}
+
+fn read_puzzle_row(row: &Row<'_>) -> rusqlite::Result<PuzzleRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
 fn database_path() -> PathBuf {
@@ -81,5 +117,34 @@ pub struct LoadError(String);
 impl fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_ids_in_order_and_wraps_after_the_last_one() {
+        let database = Connection::open_in_memory().unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE puzzle (
+                    id TEXT PRIMARY KEY,
+                    fen TEXT NOT NULL,
+                    moves TEXT NOT NULL,
+                    rating INTEGER NOT NULL
+                );
+                INSERT INTO puzzle VALUES
+                    ('b', 'fen-b', 'moves-b', 2),
+                    ('a', 'fen-a', 'moves-a', 1),
+                    ('c', 'fen-c', 'moves-c', 3);",
+            )
+            .unwrap();
+
+        assert_eq!(select_next_record(&database, None).unwrap().0, "a");
+        assert_eq!(select_next_record(&database, Some("a")).unwrap().0, "b");
+        assert_eq!(select_next_record(&database, Some("b")).unwrap().0, "c");
+        assert_eq!(select_next_record(&database, Some("c")).unwrap().0, "a");
     }
 }

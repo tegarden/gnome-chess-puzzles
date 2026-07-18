@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
 use adw::prelude::*;
 
 mod board;
@@ -6,6 +10,7 @@ mod puzzle;
 const APPLICATION_ID: &str = "io.github.tegarden.GnomeChessPuzzles";
 const APPLICATION_NAME: &str = "Gnome Chess Puzzles";
 const WINDOW_TITLE: &str = "Chess Puzzles";
+const MOVE_PLAYBACK_DELAY: Duration = Duration::from_millis(500);
 
 fn main() -> adw::glib::ExitCode {
     adw::glib::set_application_name(APPLICATION_NAME);
@@ -67,38 +72,57 @@ fn build_ui(application: &adw::Application) {
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header_bar);
-    match load_puzzle_view() {
-        Ok(puzzle_view) => {
-            toolbar_view.set_content(Some(&puzzle_view));
+    let current_puzzle_id = Rc::new(RefCell::new(None));
+    match load_puzzle_view(None) {
+        Ok(loaded) => {
+            current_puzzle_id.replace(Some(loaded.id));
+            toolbar_view.set_content(Some(&loaded.widget));
         }
-        Err(error) => {
-            let error_page = adw::StatusPage::builder()
-                .icon_name("dialog-error-symbolic")
-                .title("Unable to Load Puzzle")
-                .description(error.to_string())
-                .build();
-            toolbar_view.set_content(Some(&error_page));
-        }
+        Err(error) => show_load_error(&toolbar_view, &error),
     }
+
+    let weak_toolbar_view = toolbar_view.downgrade();
+    let current_puzzle_id_for_button = Rc::clone(&current_puzzle_id);
+    new_puzzle_button.connect_clicked(move |_| {
+        let Some(toolbar_view) = weak_toolbar_view.upgrade() else {
+            return;
+        };
+        let current_id = current_puzzle_id_for_button.borrow().clone();
+        match load_puzzle_view(current_id.as_deref()) {
+            Ok(loaded) => {
+                current_puzzle_id_for_button.replace(Some(loaded.id));
+                toolbar_view.set_content(Some(&loaded.widget));
+            }
+            Err(error) => show_load_error(&toolbar_view, &error),
+        }
+    });
+
     window.set_content(Some(&toolbar_view));
 
     window.present();
 }
 
-fn load_puzzle_view() -> Result<adw::gtk::Box, String> {
+struct LoadedPuzzleView {
+    id: String,
+    widget: adw::gtk::Box,
+}
+
+fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> {
     let puzzle::Puzzle {
         id,
         rating,
-        mut initial_fen,
+        initial_fen,
         setup_move,
-    } = puzzle::load_placeholder().map_err(|error| error.to_string())?;
+        solution,
+    } = puzzle::load_next(after_id).map_err(|error| error.to_string())?;
 
-    initial_fen
-        .apply_move(setup_move)
-        .map_err(|error| format!("could not apply setup move for puzzle {id}: {error}"))?;
-    let user_color = initial_fen.side_to_move();
-    let board = board::Board::new(initial_fen, user_color);
-    board.highlight_move(setup_move);
+    let board_initial_position = initial_fen.clone();
+    let session = puzzle::PuzzleSession::new(initial_fen, setup_move, solution)
+        .map_err(|error| format!("could not start puzzle {id}: {error}"))?;
+    let user_color = session.position().side_to_move();
+    let board = board::Board::new(board_initial_position, user_color);
+    board.set_input_enabled(false);
+    let session = Rc::new(RefCell::new(session));
 
     let heading = adw::gtk::Label::builder()
         .label(format!("Puzzle {id} (rating {rating})"))
@@ -156,6 +180,125 @@ fn load_puzzle_view() -> Result<adw::gtk::Box, String> {
     progress_area.append(&progress_buttons);
     feedback_content.append(&progress_area);
 
+    let weak_board = board.downgrade();
+    let session_for_move = Rc::clone(&session);
+    let progress_text_for_move = progress_text.clone();
+    let retry_button_for_move = retry_button.clone();
+    let show_answer_button_for_move = show_answer_button.clone();
+    board.connect_user_move(move |user_move| {
+        let Some(board) = weak_board.upgrade() else {
+            return;
+        };
+        let outcome = match session_for_move.borrow_mut().play_user_move(user_move) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!("could not record user move: {error}");
+                board.set_input_enabled(false);
+                return;
+            }
+        };
+
+        let waiting_for_opponent = match outcome {
+            puzzle::MoveOutcome::Incorrect => {
+                board.set_input_enabled(false);
+                false
+            }
+            puzzle::MoveOutcome::Correct {
+                opponent_move: Some(opponent_move),
+            } => {
+                let opponent_position = session_for_move.borrow().position().clone();
+                board.set_input_enabled(false);
+                let weak_board = board.downgrade();
+                let show_answer_button_weak = show_answer_button_for_move.downgrade();
+                adw::glib::timeout_add_local_once(MOVE_PLAYBACK_DELAY, move || {
+                    let Some(board) = weak_board.upgrade() else {
+                        return;
+                    };
+                    board.set_position(opponent_position);
+                    board.highlight_move(opponent_move);
+                    board.set_input_enabled(true);
+                    if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
+                        show_answer_button.set_sensitive(true);
+                    }
+                });
+                true
+            }
+            puzzle::MoveOutcome::Correct {
+                opponent_move: None,
+            } => {
+                board.set_input_enabled(false);
+                false
+            }
+        };
+
+        update_progress_controls(
+            session_for_move.borrow().progress(),
+            &board,
+            &progress_text_for_move,
+            &retry_button_for_move,
+            &show_answer_button_for_move,
+        );
+        if waiting_for_opponent {
+            show_answer_button_for_move.set_sensitive(false);
+        }
+    });
+
+    let weak_board = board.downgrade();
+    let session_for_retry = Rc::clone(&session);
+    let progress_text_for_retry = progress_text.clone();
+    let show_answer_button_weak = show_answer_button.downgrade();
+    retry_button.connect_clicked(move |retry_button| {
+        let Some(board) = weak_board.upgrade() else {
+            return;
+        };
+        if !session_for_retry.borrow_mut().retry() {
+            return;
+        }
+
+        let session = session_for_retry.borrow();
+        board.set_position(session.position().clone());
+        board.highlight_move(session.last_opponent_move());
+        board.set_input_enabled(true);
+        if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
+            update_progress_controls(
+                session.progress(),
+                &board,
+                &progress_text_for_retry,
+                retry_button,
+                &show_answer_button,
+            );
+        }
+    });
+
+    let weak_board = board.downgrade();
+    let session_for_answer = Rc::clone(&session);
+    let progress_text_for_answer = progress_text.clone();
+    let retry_button_weak = retry_button.downgrade();
+    show_answer_button.connect_clicked(move |show_answer_button| {
+        let Some(board) = weak_board.upgrade() else {
+            return;
+        };
+        let answer_steps = match session_for_answer.borrow_mut().show_answer() {
+            Ok(answer_steps) => answer_steps,
+            Err(error) => {
+                eprintln!("could not show puzzle answer: {error}");
+                return;
+            }
+        };
+
+        board.set_input_enabled(false);
+        play_answer_steps(&board, answer_steps);
+        if let Some(retry_button) = retry_button_weak.upgrade() {
+            update_progress_controls(
+                session_for_answer.borrow().progress(),
+                &board,
+                &progress_text_for_answer,
+                &retry_button,
+                show_answer_button,
+            );
+        }
+    });
+
     let feedback_panel = adw::gtk::Frame::builder()
         .child(&feedback_content)
         .width_request(280)
@@ -170,7 +313,68 @@ fn load_puzzle_view() -> Result<adw::gtk::Box, String> {
     puzzle_view.append(&board);
     puzzle_view.append(&feedback_panel);
 
-    Ok(puzzle_view)
+    let setup_position = session.borrow().position().clone();
+    let weak_board = board.downgrade();
+    let show_answer_button_weak = show_answer_button.downgrade();
+    adw::glib::timeout_add_local_once(MOVE_PLAYBACK_DELAY, move || {
+        let Some(board) = weak_board.upgrade() else {
+            return;
+        };
+        board.set_position(setup_position);
+        board.highlight_move(setup_move);
+        board.set_input_enabled(true);
+        if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
+            show_answer_button.set_sensitive(true);
+        }
+    });
+
+    Ok(LoadedPuzzleView {
+        id,
+        widget: puzzle_view,
+    })
+}
+
+fn play_answer_steps(board: &board::Board, steps: Vec<puzzle::AnswerStep>) {
+    for (index, step) in steps.into_iter().enumerate() {
+        let weak_board = board.downgrade();
+        let delay =
+            Duration::from_millis(MOVE_PLAYBACK_DELAY.as_millis() as u64 * (index as u64 + 1));
+        adw::glib::timeout_add_local_once(delay, move || {
+            let Some(board) = weak_board.upgrade() else {
+                return;
+            };
+            board.set_position(step.position);
+            board.highlight_move(step.chess_move);
+        });
+    }
+}
+
+fn show_load_error(toolbar_view: &adw::ToolbarView, error: &str) {
+    let error_page = adw::StatusPage::builder()
+        .icon_name("dialog-error-symbolic")
+        .title("Unable to Load Puzzle")
+        .description(error)
+        .build();
+    toolbar_view.set_content(Some(&error_page));
+}
+
+fn update_progress_controls(
+    progress: puzzle::Progress,
+    board: &board::Board,
+    progress_text: &adw::gtk::Label,
+    retry_button: &adw::gtk::Button,
+    show_answer_button: &adw::gtk::Button,
+) {
+    let border_state = match progress.terminal_state() {
+        None => board::BorderState::InProgress,
+        Some(puzzle::TerminalState::Succeeded) => board::BorderState::Succeeded,
+        Some(puzzle::TerminalState::SucceededAfterRetry) => board::BorderState::SucceededAfterRetry,
+        Some(puzzle::TerminalState::Failed) => board::BorderState::Failed,
+    };
+    board.set_border_state(border_state);
+    progress_text.set_label(progress.feedback_text());
+    retry_button.set_sensitive(progress.retry_enabled());
+    show_answer_button.set_sensitive(progress.show_answer_enabled());
 }
 
 fn show_about_dialog(application: &adw::Application) {
