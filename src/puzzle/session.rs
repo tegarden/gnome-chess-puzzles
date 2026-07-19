@@ -155,20 +155,27 @@ impl PuzzleSession {
             .apply_move(user_move.chess_move)
             .map_err(|error| SessionError(format!("could not apply user move: {error}")))?;
 
-        if self.solution.get(self.next_move) != Some(&user_move.chess_move) {
+        let matches_solution = self.solution.get(self.next_move) == Some(&user_move.chess_move);
+        let is_checkmate = self.position.is_checkmate();
+        if !matches_solution && !is_checkmate {
             self.made_mistake = true;
             self.progress = Progress::Incorrect;
             self.retry_position = Some(position_before_move);
             return Ok(MoveOutcome::Incorrect { user_move });
         }
 
+        if is_checkmate {
+            self.next_move = self.solution.len();
+            self.complete_successfully();
+            return Ok(MoveOutcome::Correct {
+                user_move,
+                opponent_move: None,
+            });
+        }
+
         self.next_move += 1;
         if self.next_move == self.solution.len() {
-            self.progress = Progress::Complete(if self.made_mistake {
-                TerminalState::SucceededAfterRetry
-            } else {
-                TerminalState::Succeeded
-            });
+            self.complete_successfully();
             return Ok(MoveOutcome::Correct {
                 user_move,
                 opponent_move: None,
@@ -197,6 +204,14 @@ impl PuzzleSession {
             user_move,
             opponent_move: Some(opponent_move),
         })
+    }
+
+    fn complete_successfully(&mut self) {
+        self.progress = Progress::Complete(if self.made_mistake {
+            TerminalState::SucceededAfterRetry
+        } else {
+            TerminalState::Succeeded
+        });
     }
 
     pub fn retry(&mut self) -> bool {
@@ -315,6 +330,34 @@ mod tests {
         session
             .play_user_move(ChessMove::from_uci("d2d4").unwrap())
             .unwrap();
+        assert_eq!(
+            session.progress(),
+            Progress::Complete(TerminalState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn alternate_checkmate_is_accepted_for_puzzle_001kr() {
+        let mut session = PuzzleSession::new(
+            Position::from_fen("6Qk/p1p3pp/4N3/1p6/2q1r1n1/2B5/PP4PP/3R1R1K b - - 0 28").unwrap(),
+            ChessMove::from_uci("h8g8").unwrap(),
+            vec![ChessMove::from_uci("f1f8").unwrap()],
+        )
+        .unwrap();
+
+        let outcome = session
+            .play_user_move(ChessMove::from_uci("d1d8").unwrap())
+            .unwrap();
+
+        let MoveOutcome::Correct {
+            user_move,
+            opponent_move: None,
+        } = outcome
+        else {
+            panic!("alternate checkmate should complete the puzzle");
+        };
+        assert_eq!(user_move.algebraic, "Rd8#");
+        assert!(session.position().is_checkmate());
         assert_eq!(
             session.progress(),
             Progress::Complete(TerminalState::Succeeded)

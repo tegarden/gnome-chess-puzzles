@@ -116,6 +116,10 @@ impl Position {
         color_from_shakmaty(self.inner.turn())
     }
 
+    pub fn is_checkmate(&self) -> bool {
+        self.inner.is_checkmate()
+    }
+
     pub fn legal_move(&self, from: Square, to: Square) -> Option<ChessMove> {
         let mut fallback = None;
         for chess_move in self.inner.legal_moves() {
