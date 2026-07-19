@@ -117,6 +117,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
     let puzzle::Puzzle {
         id,
         rating,
+        rating_deviation,
         initial_fen,
         setup_move,
         solution,
@@ -249,8 +250,22 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
             }
         };
 
+        let rating_update = session_for_move
+            .borrow()
+            .progress()
+            .terminal_state()
+            .and_then(|result| {
+                match history::record(&puzzle_id_for_move, rating, rating_deviation, result) {
+                    Ok(update) => Some(update),
+                    Err(error) => {
+                        eprintln!("could not record completed puzzle: {error}");
+                        None
+                    }
+                }
+            });
         update_progress_controls(
             session_for_move.borrow().progress(),
+            rating_update,
             &board,
             &progress_text_for_move,
             &retry_button_for_move,
@@ -258,11 +273,6 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         );
         if waiting_for_opponent {
             show_answer_button_for_move.set_sensitive(false);
-        }
-        if let Some(result) = session_for_move.borrow().progress().terminal_state()
-            && let Err(error) = history::record(&puzzle_id_for_move, rating, result)
-        {
-            eprintln!("could not record completed puzzle: {error}");
         }
     });
 
@@ -287,6 +297,7 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         if let Some(show_answer_button) = show_answer_button_weak.upgrade() {
             update_progress_controls(
                 session.progress(),
+                None,
                 &board,
                 &progress_text_for_retry,
                 retry_button,
@@ -315,14 +326,22 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
 
         board.set_input_enabled(false);
         play_answer_steps(&board, &move_list_for_answer, answer_steps);
-        if let Err(error) =
-            history::record(&puzzle_id_for_answer, rating, puzzle::TerminalState::Failed)
-        {
-            eprintln!("could not record completed puzzle: {error}");
-        }
+        let rating_update = match history::record(
+            &puzzle_id_for_answer,
+            rating,
+            rating_deviation,
+            puzzle::TerminalState::Failed,
+        ) {
+            Ok(update) => Some(update),
+            Err(error) => {
+                eprintln!("could not record completed puzzle: {error}");
+                None
+            }
+        };
         if let Some(retry_button) = retry_button_weak.upgrade() {
             update_progress_controls(
                 session_for_answer.borrow().progress(),
+                rating_update,
                 &board,
                 &progress_text_for_answer,
                 &retry_button,
@@ -400,6 +419,7 @@ fn show_load_error(toolbar_view: &adw::ToolbarView, error: &str) {
 
 fn update_progress_controls(
     progress: puzzle::Progress,
+    rating_update: Option<history::RatingUpdate>,
     board: &board::Board,
     progress_text: &adw::gtk::Label,
     retry_button: &adw::gtk::Button,
@@ -412,9 +432,29 @@ fn update_progress_controls(
         Some(puzzle::TerminalState::Failed) => board::BorderState::Failed,
     };
     board.set_border_state(border_state);
-    progress_text.set_label(progress.feedback_text());
+    progress_text.set_label(&progress_feedback_text(progress, rating_update));
     retry_button.set_sensitive(progress.retry_enabled());
     show_answer_button.set_sensitive(progress.show_answer_enabled());
+}
+
+fn progress_feedback_text(
+    progress: puzzle::Progress,
+    rating_update: Option<history::RatingUpdate>,
+) -> String {
+    match (progress, rating_update) {
+        (puzzle::Progress::Complete(terminal_state), Some(rating_update)) => {
+            let result = match terminal_state {
+                puzzle::TerminalState::Succeeded => "You solved the puzzle.",
+                puzzle::TerminalState::SucceededAfterRetry => "You solved the puzzle with retries.",
+                puzzle::TerminalState::Failed => "You did not solve the puzzle.",
+            };
+            format!(
+                "{result}\nYour rating is now {} ({:+}).",
+                rating_update.rating, rating_update.change
+            )
+        }
+        _ => progress.feedback_text().to_owned(),
+    }
 }
 
 fn show_about_dialog(application: &adw::Application) {
@@ -432,4 +472,61 @@ fn show_about_dialog(application: &adw::Application) {
         .build();
 
     dialog.present(Some(&window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_feedback_includes_rating_and_signed_change() {
+        let cases = [
+            (
+                puzzle::TerminalState::Succeeded,
+                history::RatingUpdate {
+                    rating: 503,
+                    change: 3,
+                },
+                "You solved the puzzle.\nYour rating is now 503 (+3).",
+            ),
+            (
+                puzzle::TerminalState::SucceededAfterRetry,
+                history::RatingUpdate {
+                    rating: 498,
+                    change: -5,
+                },
+                "You solved the puzzle with retries.\nYour rating is now 498 (-5).",
+            ),
+            (
+                puzzle::TerminalState::Failed,
+                history::RatingUpdate {
+                    rating: 498,
+                    change: -5,
+                },
+                "You did not solve the puzzle.\nYour rating is now 498 (-5).",
+            ),
+        ];
+
+        for (terminal_state, rating_update, expected) in cases {
+            assert_eq!(
+                progress_feedback_text(
+                    puzzle::Progress::Complete(terminal_state),
+                    Some(rating_update)
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn in_progress_feedback_is_unchanged() {
+        assert_eq!(
+            progress_feedback_text(puzzle::Progress::InProgress, None),
+            ""
+        );
+        assert_eq!(
+            progress_feedback_text(puzzle::Progress::Incorrect, None),
+            "That move is not correct."
+        );
+    }
 }

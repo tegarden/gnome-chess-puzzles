@@ -8,11 +8,12 @@ use super::{ChessMove, Position};
 
 const DATABASE_FILE: &str = "puzzles.sqlite";
 const DATA_DIR_ENVIRONMENT_VARIABLE: &str = "GNOME_CHESS_PUZZLES_DATA_DIR";
-type PuzzleRow = (String, String, String, i64);
+type PuzzleRow = (String, String, String, i64, i64);
 
 pub struct Puzzle {
     pub id: String,
     pub rating: u16,
+    pub rating_deviation: u16,
     pub initial_fen: Position,
     pub setup_move: ChessMove,
     pub solution: Vec<ChessMove>,
@@ -28,12 +29,17 @@ pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
             ))
         })?;
 
-    let (id, fen, moves, rating) = select_next_record(&database, after_id)
+    let (id, fen, moves, rating, rating_deviation) = select_next_record(&database, after_id)
         .map_err(|error| LoadError(format!("could not select a puzzle: {error}")))?;
 
     let rating = rating
         .try_into()
         .map_err(|_| LoadError(format!("puzzle {id} has an invalid rating: {rating}")))?;
+    let rating_deviation = rating_deviation.try_into().map_err(|_| {
+        LoadError(format!(
+            "puzzle {id} has an invalid rating deviation: {rating_deviation}"
+        ))
+    })?;
 
     let initial_fen = Position::from_fen(&fen)
         .map_err(|error| LoadError(format!("puzzle {id} has an invalid FEN: {error}")))?;
@@ -52,6 +58,7 @@ pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
     Ok(Puzzle {
         id,
         rating,
+        rating_deviation,
         initial_fen,
         setup_move,
         solution,
@@ -66,7 +73,7 @@ fn select_next_record(
         .map(|id| {
             database
                 .query_row(
-                    "SELECT id, fen, moves, rating
+                    "SELECT id, fen, moves, rating, rating_deviation
                      FROM puzzle
                      WHERE id > ?1
                      ORDER BY id
@@ -84,14 +91,21 @@ fn select_next_record(
         return Ok(record);
     }
     database.query_row(
-        "SELECT id, fen, moves, rating FROM puzzle ORDER BY id LIMIT 1",
+        "SELECT id, fen, moves, rating, rating_deviation
+         FROM puzzle ORDER BY id LIMIT 1",
         [],
         read_puzzle_row,
     )
 }
 
 fn read_puzzle_row(row: &Row<'_>) -> rusqlite::Result<PuzzleRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn database_path() -> PathBuf {
@@ -133,12 +147,13 @@ mod tests {
                     id TEXT PRIMARY KEY,
                     fen TEXT NOT NULL,
                     moves TEXT NOT NULL,
-                    rating INTEGER NOT NULL
+                    rating INTEGER NOT NULL,
+                    rating_deviation INTEGER NOT NULL
                 );
                 INSERT INTO puzzle VALUES
-                    ('b', 'fen-b', 'moves-b', 2),
-                    ('a', 'fen-a', 'moves-a', 1),
-                    ('c', 'fen-c', 'moves-c', 3);",
+                    ('b', 'fen-b', 'moves-b', 2, 20),
+                    ('a', 'fen-a', 'moves-a', 1, 10),
+                    ('c', 'fen-c', 'moves-c', 3, 30);",
             )
             .unwrap();
 

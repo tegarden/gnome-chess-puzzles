@@ -5,29 +5,57 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use adw::gtk;
 use adw::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::puzzle::TerminalState;
 
 const HISTORY_DIRECTORY: &str = "gnome-chess-puzzles";
 const HISTORY_DATABASE: &str = "history.sqlite";
+const HISTORY_SCHEMA_VERSION: i64 = 2;
+const PLAYER_RATING_WINDOW: usize = 20;
+const INITIAL_PLAYER_RATING: i32 = 400;
 
 pub struct HistoryEntry {
     pub completed_at: String,
     pub puzzle_id: String,
     pub rating: u16,
     pub result: &'static str,
+    pub player_rating: i32,
 }
 
-pub fn record(puzzle_id: &str, rating: u16, result: TerminalState) -> Result<(), HistoryError> {
-    let database = open_database()?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RatingUpdate {
+    pub rating: i32,
+    pub change: i32,
+}
+
+pub fn record(
+    puzzle_id: &str,
+    rating: u16,
+    rating_deviation: u16,
+    result: TerminalState,
+) -> Result<RatingUpdate, HistoryError> {
+    let mut database = open_database()?;
     let completed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| HistoryError(format!("system clock is before the Unix epoch: {error}")))?
         .as_secs() as i64;
-    insert_entry(&database, completed_at, puzzle_id, rating, result)
-        .map_err(|error| HistoryError(format!("could not save puzzle history: {error}")))?;
-    Ok(())
+    let transaction = database
+        .transaction()
+        .map_err(|error| HistoryError(format!("could not start history transaction: {error}")))?;
+    let rating_update = insert_entry_with_rating_update(
+        &transaction,
+        completed_at,
+        puzzle_id,
+        rating,
+        rating_deviation,
+        result,
+    )
+    .map_err(|error| HistoryError(format!("could not save puzzle history: {error}")))?;
+    transaction
+        .commit()
+        .map_err(|error| HistoryError(format!("could not commit puzzle history: {error}")))?;
+    Ok(rating_update)
 }
 
 pub fn show_window(application: &adw::Application) {
@@ -35,7 +63,7 @@ pub fn show_window(application: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .title("History")
-        .default_width(480)
+        .default_width(590)
         .default_height(460)
         .build();
     window.set_modal(true);
@@ -95,7 +123,7 @@ fn history_table(entries: &[HistoryEntry]) -> gtk::Box {
     let table = gtk::Box::new(gtk::Orientation::Vertical, 0);
     table.set_hexpand(true);
 
-    let header = history_row("Completed", "Puzzle", "Rating", "Result");
+    let header = history_row("Completed", "Puzzle", "Rating", "Result", "Player Rating");
     let mut child = header.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
@@ -127,6 +155,7 @@ fn history_table(entries: &[HistoryEntry]) -> gtk::Box {
             &entry.puzzle_id,
             &entry.rating.to_string(),
             entry.result,
+            &entry.player_rating.to_string(),
         );
         if index % 2 == 1 {
             row.add_css_class("history-row-alt");
@@ -138,12 +167,19 @@ fn history_table(entries: &[HistoryEntry]) -> gtk::Box {
     table
 }
 
-fn history_row(completed: &str, puzzle: &str, rating: &str, result: &str) -> gtk::Box {
+fn history_row(
+    completed: &str,
+    puzzle: &str,
+    rating: &str,
+    result: &str,
+    player_rating: &str,
+) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     row.append(&table_label(completed, 0.0, 19));
     row.append(&table_label(puzzle, 0.0, 7));
     row.append(&table_label(rating, 1.0, 6));
     row.append(&table_label(result, 0.0, 22));
+    row.append(&table_label(player_rating, 1.0, 13));
     row
 }
 
@@ -193,14 +229,22 @@ fn open_database() -> Result<Connection, HistoryError> {
 }
 
 fn initialize(database: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = database.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != HISTORY_SCHEMA_VERSION {
+        database.execute_batch("DROP TABLE IF EXISTS history;")?;
+    }
     database.execute_batch(
         "CREATE TABLE IF NOT EXISTS history (
             sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
             completed_at  INTEGER NOT NULL,
             puzzle_id     TEXT NOT NULL,
             rating        INTEGER NOT NULL,
-            result        TEXT NOT NULL
-        );",
+            rating_deviation INTEGER NOT NULL,
+            result        TEXT NOT NULL,
+            result_rating INTEGER NOT NULL,
+            player_rating INTEGER NOT NULL
+        );
+        PRAGMA user_version = 2;",
     )
 }
 
@@ -209,20 +253,107 @@ fn insert_entry(
     completed_at: i64,
     puzzle_id: &str,
     rating: u16,
+    rating_deviation: u16,
     result: TerminalState,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<i32> {
+    let result_rating = result_rating(rating, rating_deviation, result);
+    let player_rating = next_player_rating(database, result_rating, result)?;
     database.execute(
-        "INSERT INTO history (completed_at, puzzle_id, rating, result)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![completed_at, puzzle_id, rating, result_key(result)],
+        "INSERT INTO history (
+            completed_at, puzzle_id, rating, rating_deviation,
+            result, result_rating, player_rating
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            completed_at,
+            puzzle_id,
+            rating,
+            rating_deviation,
+            result_key(result),
+            result_rating,
+            player_rating
+        ],
     )?;
-    Ok(())
+    Ok(player_rating)
+}
+
+fn insert_entry_with_rating_update(
+    database: &Connection,
+    completed_at: i64,
+    puzzle_id: &str,
+    rating: u16,
+    rating_deviation: u16,
+    result: TerminalState,
+) -> rusqlite::Result<RatingUpdate> {
+    let previous_rating = current_player_rating(database)?;
+    let player_rating = insert_entry(
+        database,
+        completed_at,
+        puzzle_id,
+        rating,
+        rating_deviation,
+        result,
+    )?;
+    Ok(RatingUpdate {
+        rating: player_rating,
+        change: player_rating - previous_rating,
+    })
+}
+
+fn result_rating(rating: u16, rating_deviation: u16, result: TerminalState) -> i32 {
+    match result {
+        TerminalState::Succeeded => i32::from(rating) + i32::from(rating_deviation),
+        TerminalState::SucceededAfterRetry | TerminalState::Failed => {
+            i32::from(rating) - i32::from(rating_deviation)
+        }
+    }
+}
+
+fn next_player_rating(
+    database: &Connection,
+    current_result_rating: i32,
+    result: TerminalState,
+) -> rusqlite::Result<i32> {
+    let mut statement = database.prepare(
+        "SELECT result_rating
+         FROM history
+         ORDER BY completed_at DESC, sequence DESC
+         LIMIT 19",
+    )?;
+    let previous = statement
+        .query_map([], |row| row.get::<_, i32>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let value_count = previous.len() + 1;
+    let sum = previous.into_iter().sum::<i32>()
+        + current_result_rating
+        + (PLAYER_RATING_WINDOW - value_count) as i32 * INITIAL_PLAYER_RATING;
+    let calculated_rating = (f64::from(sum) / PLAYER_RATING_WINDOW as f64).round() as i32;
+    let previous_rating = current_player_rating(database)?;
+    Ok(match result {
+        TerminalState::Succeeded => calculated_rating.max(previous_rating + 1),
+        TerminalState::SucceededAfterRetry | TerminalState::Failed => {
+            calculated_rating.min(previous_rating - 1)
+        }
+    })
+}
+
+fn current_player_rating(database: &Connection) -> rusqlite::Result<i32> {
+    Ok(database
+        .query_row(
+            "SELECT player_rating
+             FROM history
+             ORDER BY completed_at DESC, sequence DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(INITIAL_PLAYER_RATING))
 }
 
 fn list_entries(database: &Connection) -> rusqlite::Result<Vec<HistoryEntry>> {
     let mut statement = database.prepare(
         "SELECT strftime('%Y-%m-%d %H:%M:%S', completed_at, 'unixepoch', 'localtime'),
-                puzzle_id, rating, result
+                puzzle_id, rating, result, player_rating
          FROM history
          ORDER BY completed_at DESC, sequence DESC",
     )?;
@@ -234,6 +365,7 @@ fn list_entries(database: &Connection) -> rusqlite::Result<Vec<HistoryEntry>> {
                 puzzle_id: row.get(1)?,
                 rating: row.get(2)?,
                 result: result_label(&result),
+                player_rating: row.get(4)?,
             })
         })?
         .collect()
@@ -273,25 +405,110 @@ mod tests {
     fn stores_entries_most_recent_first_and_clears_them() {
         let database = Connection::open_in_memory().unwrap();
         initialize(&database).unwrap();
-        insert_entry(&database, 100, "first", 1200, TerminalState::Succeeded).unwrap();
-        insert_entry(
-            &database,
-            200,
-            "second",
-            1400,
-            TerminalState::SucceededAfterRetry,
-        )
-        .unwrap();
-        insert_entry(&database, 200, "third", 1600, TerminalState::Failed).unwrap();
+        assert_eq!(
+            insert_entry(&database, 100, "first", 1200, 100, TerminalState::Succeeded,).unwrap(),
+            445
+        );
+        assert_eq!(current_player_rating(&database).unwrap(), 445);
+        assert_eq!(
+            insert_entry(
+                &database,
+                200,
+                "second",
+                1400,
+                100,
+                TerminalState::SucceededAfterRetry,
+            )
+            .unwrap(),
+            444
+        );
+        assert_eq!(
+            insert_entry(&database, 200, "third", 1600, 100, TerminalState::Failed,).unwrap(),
+            443
+        );
 
         let entries = list_entries(&database).unwrap();
         assert_eq!(entries[0].puzzle_id, "third");
         assert_eq!(entries[0].result, "Failed");
+        assert_eq!(entries[0].player_rating, 443);
         assert_eq!(entries[1].puzzle_id, "second");
         assert_eq!(entries[1].result, "Succeeded after Retry");
         assert_eq!(entries[2].puzzle_id, "first");
 
         database.execute("DELETE FROM history", []).unwrap();
         assert!(list_entries(&database).unwrap().is_empty());
+    }
+
+    #[test]
+    fn player_rating_uses_only_the_most_recent_twenty_results() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        for sequence in 0..20 {
+            insert_entry(
+                &database,
+                sequence,
+                "steady",
+                600,
+                0,
+                TerminalState::Succeeded,
+            )
+            .unwrap();
+        }
+
+        let rating =
+            insert_entry(&database, 20, "latest", 1000, 0, TerminalState::Succeeded).unwrap();
+
+        assert_eq!(rating, 620);
+    }
+
+    #[test]
+    fn rating_update_reports_the_change_from_the_previous_rating() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+
+        let update = insert_entry_with_rating_update(
+            &database,
+            100,
+            "first",
+            1200,
+            100,
+            TerminalState::Succeeded,
+        )
+        .unwrap();
+
+        assert_eq!(
+            update,
+            RatingUpdate {
+                rating: 445,
+                change: 45,
+            }
+        );
+    }
+
+    #[test]
+    fn rating_always_moves_in_the_direction_of_the_result() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+
+        assert_eq!(
+            insert_entry(&database, 100, "failed", 0, 0, TerminalState::Failed).unwrap(),
+            380
+        );
+        assert_eq!(
+            insert_entry(&database, 200, "succeeded", 0, 0, TerminalState::Succeeded).unwrap(),
+            381
+        );
+        assert_eq!(
+            insert_entry(
+                &database,
+                300,
+                "retry",
+                2000,
+                0,
+                TerminalState::SucceededAfterRetry,
+            )
+            .unwrap(),
+            380
+        );
     }
 }
