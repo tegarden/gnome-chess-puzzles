@@ -58,6 +58,15 @@ def validate_count(value: str) -> int:
     return count
 
 
+def validate_rating_deviation(value: str) -> int:
+    rating_deviation = int(value)
+    if rating_deviation < 0:
+        raise argparse.ArgumentTypeError(
+            "maximum rating deviation must be zero or greater"
+        )
+    return rating_deviation
+
+
 def insert_rows(database: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
     """Insert puzzle rows and their normalized themes."""
     inserted = 0
@@ -94,8 +103,10 @@ def insert_rows(database: sqlite3.Connection, rows: Iterable[dict[str, Any]]) ->
     return inserted
 
 
-def import_puzzles(source: Path, output: Path, count: int) -> tuple[int, int]:
-    """Scan source and import all rows or the most popular ``count`` rows."""
+def import_puzzles(
+    source: Path, output: Path, count: int, max_rating_deviation: int = 100
+) -> tuple[int, int]:
+    """Import qualifying rows, limited to the most popular ``count`` rows."""
     if not source.is_file():
         raise SystemExit(f"Puzzle export not found: {source}")
 
@@ -112,16 +123,25 @@ def import_puzzles(source: Path, output: Path, count: int) -> tuple[int, int]:
                     f"expected {EXPECTED_COLUMNS}, got {reader.fieldnames}"
                 )
 
+            scanned = 0
             if count == 0:
-                imported = insert_rows(database, reader)
-                scanned = imported
+
+                def qualifying_rows() -> Iterable[dict[str, Any]]:
+                    nonlocal scanned
+                    for row in reader:
+                        scanned += 1
+                        if int(row["RatingDeviation"]) <= max_rating_deviation:
+                            yield row
+
+                imported = insert_rows(database, qualifying_rows())
             else:
                 # The input position makes ties deterministic: if popularity is
                 # equal, retain the puzzle that appears earlier in the export.
                 most_popular: list[tuple[int, int, dict[str, Any]]] = []
-                scanned = 0
                 for position, row in enumerate(reader):
                     scanned += 1
+                    if int(row["RatingDeviation"]) > max_rating_deviation:
+                        continue
                     candidate = (int(row["Popularity"]), -position, row)
                     if len(most_popular) < count:
                         heapq.heappush(most_popular, candidate)
@@ -142,7 +162,14 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         type=validate_count,
         default=0,
-        help="number of most popular puzzles to import; 0 imports all puzzles",
+        help="number of most popular qualifying puzzles to import; 0 imports all",
+    )
+    parser.add_argument(
+        "--max-rating-deviation",
+        type=validate_rating_deviation,
+        default=100,
+        metavar="VALUE",
+        help="maximum rating deviation to import (default: 100)",
     )
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -151,7 +178,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    scanned, imported = import_puzzles(args.source, args.output, args.count)
+    scanned, imported = import_puzzles(
+        args.source, args.output, args.count, args.max_rating_deviation
+    )
     print(f"Scanned {scanned} puzzles and imported {imported} into {args.output}")
 
 

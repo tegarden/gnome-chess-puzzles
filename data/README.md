@@ -15,8 +15,11 @@ to the build, not an application asset. Place it at
 The importer streams the compressed CSV rather than decompressing it to an
 intermediate file. Its positional argument is the number of most popular
 puzzles to retain. The entire export is scanned to choose that subset; pass `0`
-or omit the argument to import every puzzle. Equal-popularity puzzles are
-selected in source-file order.
+or omit the argument to import every qualifying puzzle. By default, puzzles
+with a rating deviation greater than 100 are excluded. Override that cutoff
+with `--max-rating-deviation VALUE`. The count is applied after this filter, so
+it continues to represent the number of puzzles written to the output. Equal-
+popularity puzzles are selected in source-file order.
 
 The script requires Python 3.14 or newer, or the third-party `zstandard` Python
 package on older Python versions. Alternate paths can be supplied with
