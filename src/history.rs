@@ -15,6 +15,7 @@ const HISTORY_DATABASE: &str = "history.sqlite";
 const HISTORY_SCHEMA_VERSION: i64 = 2;
 const PLAYER_RATING_WINDOW: usize = 20;
 const INITIAL_PLAYER_RATING: i32 = 400;
+const MAXIMUM_RATING_CHANGE: i32 = 100;
 
 pub struct HistoryEntry {
     pub completed_at: String,
@@ -269,7 +270,7 @@ fn insert_entry(
     result: TerminalState,
 ) -> rusqlite::Result<i32> {
     let result_rating = result_rating(rating, rating_deviation, result);
-    let player_rating = next_player_rating(database, result_rating, result)?;
+    let player_rating = next_player_rating(database, result_rating, rating_deviation, result)?;
     database.execute(
         "INSERT INTO history (
             completed_at, puzzle_id, rating, rating_deviation,
@@ -323,6 +324,7 @@ fn result_rating(rating: u16, rating_deviation: u16, result: TerminalState) -> i
 fn next_player_rating(
     database: &Connection,
     current_result_rating: i32,
+    rating_deviation: u16,
     result: TerminalState,
 ) -> rusqlite::Result<i32> {
     let mut statement = database.prepare(
@@ -340,12 +342,43 @@ fn next_player_rating(
         + (PLAYER_RATING_WINDOW - value_count) as i32 * INITIAL_PLAYER_RATING;
     let calculated_rating = (f64::from(sum) / PLAYER_RATING_WINDOW as f64).round() as i32;
     let previous_rating = current_player_rating(database)?;
-    Ok(match result {
-        TerminalState::Succeeded => calculated_rating.max(previous_rating + 1),
+    let minimum_change = minimum_directional_change(rating_deviation);
+    let rating = match result {
+        TerminalState::Succeeded => calculated_rating.max(previous_rating + minimum_change),
         TerminalState::SucceededAfterRetry | TerminalState::Failed => {
-            calculated_rating.min(previous_rating - 1)
+            calculated_rating.min(previous_rating - minimum_change)
         }
-    })
+    };
+    let multiplier = streak_multiplier(database, result)?;
+    let change = multiplied_rating_change(rating - previous_rating, multiplier);
+    Ok(previous_rating + change)
+}
+
+fn multiplied_rating_change(change: i32, multiplier: i32) -> i32 {
+    (change * multiplier).clamp(-MAXIMUM_RATING_CHANGE, MAXIMUM_RATING_CHANGE)
+}
+
+fn minimum_directional_change(rating_deviation: u16) -> i32 {
+    ((f64::from(rating_deviation) / PLAYER_RATING_WINDOW as f64).round() as i32).max(1)
+}
+
+fn streak_multiplier(database: &Connection, result: TerminalState) -> rusqlite::Result<i32> {
+    let mut statement = database.prepare(
+        "SELECT result
+         FROM history
+         ORDER BY completed_at DESC, sequence DESC
+         LIMIT 9",
+    )?;
+    let previous_results = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let current_is_correct = result == TerminalState::Succeeded;
+    let streak = previous_results
+        .iter()
+        .take_while(|previous| (previous.as_str() == "succeeded") == current_is_correct)
+        .count()
+        + 1;
+    Ok(1 << (streak - 1).min(5))
 }
 
 fn current_player_rating(database: &Connection) -> rusqlite::Result<i32> {
@@ -444,17 +477,17 @@ mod tests {
                 TerminalState::SucceededAfterRetry,
             )
             .unwrap(),
-            444
+            440
         );
         assert_eq!(
             insert_entry(&database, 200, "third", 1600, 100, TerminalState::Failed,).unwrap(),
-            443
+            430
         );
 
         let entries = list_entries(&database).unwrap();
         assert_eq!(entries[0].puzzle_id, "third");
         assert_eq!(entries[0].result, "Failed");
-        assert_eq!(entries[0].player_rating, 443);
+        assert_eq!(entries[0].player_rating, 430);
         assert_eq!(entries[1].puzzle_id, "second");
         assert_eq!(entries[1].result, "Succeeded after Retry");
         assert_eq!(entries[2].puzzle_id, "first");
@@ -482,7 +515,7 @@ mod tests {
         let rating =
             insert_entry(&database, 20, "latest", 1000, 0, TerminalState::Succeeded).unwrap();
 
-        assert_eq!(rating, 620);
+        assert_eq!(rating, 1010);
     }
 
     #[test]
@@ -537,6 +570,96 @@ mod tests {
     }
 
     #[test]
+    fn minimum_directional_change_is_proportional_to_deviation() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+
+        for sequence in 0..20 {
+            let result_rating = if sequence == 0 { 718 } else { 797 };
+            database
+                .execute(
+                    "INSERT INTO history (
+                        completed_at, puzzle_id, rating, rating_deviation,
+                        result, result_rating, player_rating
+                     ) VALUES (?1, 'previous', 793, 0, 'succeeded', ?2, 793)",
+                    params![sequence, result_rating],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            insert_entry(
+                &database,
+                2,
+                "retry",
+                793,
+                75,
+                TerminalState::SucceededAfterRetry,
+            )
+            .unwrap(),
+            789
+        );
+        assert_eq!(minimum_directional_change(75), 4);
+        assert_eq!(minimum_directional_change(0), 1);
+    }
+
+    #[test]
+    fn streak_multiplier_grows_exponentially_resets_and_caps_at_thirty_two() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+
+        assert_eq!(
+            streak_multiplier(&database, TerminalState::Succeeded).unwrap(),
+            1
+        );
+        for sequence in 0..12 {
+            assert_eq!(
+                streak_multiplier(&database, TerminalState::Succeeded).unwrap(),
+                1 << sequence.min(5)
+            );
+            database
+                .execute(
+                    "INSERT INTO history (
+                        completed_at, puzzle_id, rating, rating_deviation,
+                        result, result_rating, player_rating
+                     ) VALUES (?1, 'clean', 400, 0, 'succeeded', 400, 400)",
+                    [sequence],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            streak_multiplier(&database, TerminalState::Succeeded).unwrap(),
+            32
+        );
+        assert_eq!(
+            streak_multiplier(&database, TerminalState::Failed).unwrap(),
+            1
+        );
+
+        database
+            .execute(
+                "INSERT INTO history (
+                    completed_at, puzzle_id, rating, rating_deviation,
+                    result, result_rating, player_rating
+                 ) VALUES (12, 'failed', 400, 0, 'failed', 400, 400)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            streak_multiplier(&database, TerminalState::SucceededAfterRetry).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn multiplied_rating_change_is_capped_at_one_hundred() {
+        assert_eq!(multiplied_rating_change(4, 32), 100);
+        assert_eq!(multiplied_rating_change(-4, 32), -100);
+        assert_eq!(multiplied_rating_change(3, 32), 96);
+    }
+
+    #[test]
     fn selection_state_contains_the_current_rating_and_completed_ids() {
         let database = Connection::open_in_memory().unwrap();
         initialize(&database).unwrap();
@@ -545,7 +668,7 @@ mod tests {
 
         let state = selection_state(&database).unwrap();
 
-        assert_eq!(state.player_rating, 444);
+        assert_eq!(state.player_rating, 440);
         assert_eq!(state.completed_puzzle_ids.len(), 2);
         assert!(state.completed_puzzle_ids.contains("first"));
         assert!(state.completed_puzzle_ids.contains("second"));
