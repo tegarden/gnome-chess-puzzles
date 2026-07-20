@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,10 @@ pub struct Puzzle {
     pub solution: Vec<ChessMove>,
 }
 
-pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
+pub fn load_for_player(
+    player_rating: i32,
+    completed_puzzle_ids: &HashSet<String>,
+) -> Result<Puzzle, LoadError> {
     let database_path = database_path();
     let database = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| {
@@ -29,8 +33,10 @@ pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
             ))
         })?;
 
-    let (id, fen, moves, rating, rating_deviation) = select_next_record(&database, after_id)
-        .map_err(|error| LoadError(format!("could not select a puzzle: {error}")))?;
+    let (id, fen, moves, rating, rating_deviation) =
+        select_best_record(&database, player_rating, completed_puzzle_ids)
+            .map_err(|error| LoadError(format!("could not select a puzzle: {error}")))?
+            .ok_or_else(|| LoadError("there are no uncompleted puzzles remaining".into()))?;
 
     let rating = rating
         .try_into()
@@ -65,37 +71,34 @@ pub fn load_next(after_id: Option<&str>) -> Result<Puzzle, LoadError> {
     })
 }
 
-fn select_next_record(
+fn select_best_record(
     database: &Connection,
-    after_id: Option<&str>,
-) -> rusqlite::Result<PuzzleRow> {
-    let next_record = after_id
-        .map(|id| {
-            database
-                .query_row(
-                    "SELECT id, fen, moves, rating, rating_deviation
-                     FROM puzzle
-                     WHERE id > ?1
-                     ORDER BY id
-                     LIMIT 1",
-                    params![id],
-                    read_puzzle_row,
-                )
-                .optional()
-        })
-        .transpose()?
-        .flatten();
-
-    // Starting up, and advancing past the final ID, both select the first puzzle.
-    if let Some(record) = next_record {
-        return Ok(record);
+    player_rating: i32,
+    completed_puzzle_ids: &HashSet<String>,
+) -> rusqlite::Result<Option<PuzzleRow>> {
+    let mut candidates = database.prepare(
+        "SELECT id
+         FROM puzzle
+         ORDER BY ABS(rating - ?1), rating_deviation, id",
+    )?;
+    let candidate_ids =
+        candidates.query_map(params![player_rating], |row| row.get::<_, String>(0))?;
+    for candidate_id in candidate_ids {
+        let candidate_id = candidate_id?;
+        if completed_puzzle_ids.contains(&candidate_id) {
+            continue;
+        }
+        return database
+            .query_row(
+                "SELECT id, fen, moves, rating, rating_deviation
+                 FROM puzzle
+                 WHERE id = ?1",
+                params![candidate_id],
+                read_puzzle_row,
+            )
+            .optional();
     }
-    database.query_row(
-        "SELECT id, fen, moves, rating, rating_deviation
-         FROM puzzle ORDER BY id LIMIT 1",
-        [],
-        read_puzzle_row,
-    )
+    Ok(None)
 }
 
 fn read_puzzle_row(row: &Row<'_>) -> rusqlite::Result<PuzzleRow> {
@@ -139,7 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selects_ids_in_order_and_wraps_after_the_last_one() {
+    fn selects_nearest_uncompleted_rating_then_lowest_deviation() {
         let database = Connection::open_in_memory().unwrap();
         database
             .execute_batch(
@@ -157,9 +160,56 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(select_next_record(&database, None).unwrap().0, "a");
-        assert_eq!(select_next_record(&database, Some("a")).unwrap().0, "b");
-        assert_eq!(select_next_record(&database, Some("b")).unwrap().0, "c");
-        assert_eq!(select_next_record(&database, Some("c")).unwrap().0, "a");
+        let mut completed = HashSet::new();
+        assert_eq!(
+            select_best_record(&database, 2, &completed)
+                .unwrap()
+                .unwrap()
+                .0,
+            "b"
+        );
+
+        completed.insert("b".to_owned());
+        assert_eq!(
+            select_best_record(&database, 2, &completed)
+                .unwrap()
+                .unwrap()
+                .0,
+            "a"
+        );
+
+        completed.extend(["a".to_owned(), "c".to_owned()]);
+        assert!(
+            select_best_record(&database, 2, &completed)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rating_deviation_breaks_equal_rating_distance_ties() {
+        let database = Connection::open_in_memory().unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE puzzle (
+                    id TEXT PRIMARY KEY,
+                    fen TEXT NOT NULL,
+                    moves TEXT NOT NULL,
+                    rating INTEGER NOT NULL,
+                    rating_deviation INTEGER NOT NULL
+                );
+                INSERT INTO puzzle VALUES
+                    ('higher-deviation', 'fen', 'moves', 500, 40),
+                    ('lower-deviation', 'fen', 'moves', 700, 20);",
+            )
+            .unwrap();
+
+        assert_eq!(
+            select_best_record(&database, 600, &HashSet::new())
+                .unwrap()
+                .unwrap()
+                .0,
+            "lower-deviation"
+        );
     }
 }

@@ -113,7 +113,11 @@ struct LoadedPuzzleView {
     widget: adw::gtk::Box,
 }
 
-fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> {
+fn load_puzzle_view(excluded_puzzle_id: Option<&str>) -> Result<LoadedPuzzleView, String> {
+    let mut selection = history::puzzle_selection_state().map_err(|error| error.to_string())?;
+    if let Some(puzzle_id) = excluded_puzzle_id {
+        selection.completed_puzzle_ids.insert(puzzle_id.to_owned());
+    }
     let puzzle::Puzzle {
         id,
         rating,
@@ -121,7 +125,8 @@ fn load_puzzle_view(after_id: Option<&str>) -> Result<LoadedPuzzleView, String> 
         initial_fen,
         setup_move,
         solution,
-    } = puzzle::load_next(after_id).map_err(|error| error.to_string())?;
+    } = puzzle::load_for_player(selection.player_rating, &selection.completed_puzzle_ids)
+        .map_err(|error| error.to_string())?;
 
     let board_initial_position = initial_fen.clone();
     let session = puzzle::PuzzleSession::new(initial_fen, setup_move, solution)

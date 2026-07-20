@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -27,6 +28,17 @@ pub struct HistoryEntry {
 pub struct RatingUpdate {
     pub rating: i32,
     pub change: i32,
+}
+
+pub struct PuzzleSelectionState {
+    pub player_rating: i32,
+    pub completed_puzzle_ids: HashSet<String>,
+}
+
+pub fn puzzle_selection_state() -> Result<PuzzleSelectionState, HistoryError> {
+    let database = open_database()?;
+    selection_state(&database)
+        .map_err(|error| HistoryError(format!("could not read puzzle selection history: {error}")))
 }
 
 pub fn record(
@@ -350,6 +362,18 @@ fn current_player_rating(database: &Connection) -> rusqlite::Result<i32> {
         .unwrap_or(INITIAL_PLAYER_RATING))
 }
 
+fn selection_state(database: &Connection) -> rusqlite::Result<PuzzleSelectionState> {
+    let player_rating = current_player_rating(database)?;
+    let mut statement = database.prepare("SELECT DISTINCT puzzle_id FROM history")?;
+    let completed_puzzle_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(PuzzleSelectionState {
+        player_rating,
+        completed_puzzle_ids,
+    })
+}
+
 fn list_entries(database: &Connection) -> rusqlite::Result<Vec<HistoryEntry>> {
     let mut statement = database.prepare(
         "SELECT strftime('%Y-%m-%d %H:%M:%S', completed_at, 'unixepoch', 'localtime'),
@@ -510,5 +534,20 @@ mod tests {
             .unwrap(),
             380
         );
+    }
+
+    #[test]
+    fn selection_state_contains_the_current_rating_and_completed_ids() {
+        let database = Connection::open_in_memory().unwrap();
+        initialize(&database).unwrap();
+        insert_entry(&database, 100, "first", 1200, 100, TerminalState::Succeeded).unwrap();
+        insert_entry(&database, 200, "second", 1400, 100, TerminalState::Failed).unwrap();
+
+        let state = selection_state(&database).unwrap();
+
+        assert_eq!(state.player_rating, 444);
+        assert_eq!(state.completed_puzzle_ids.len(), 2);
+        assert!(state.completed_puzzle_ids.contains("first"));
+        assert!(state.completed_puzzle_ids.contains("second"));
     }
 }
