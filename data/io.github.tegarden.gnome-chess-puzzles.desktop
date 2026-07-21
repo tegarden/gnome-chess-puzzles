@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Gnome Chess Puzzles
+Name=Chess Puzzles
 Comment=Practice chess with tactical puzzles
 Exec=gnome-chess-puzzles
+Icon=io.github.tegarden.gnome-chess-puzzles
 Terminal=false
 Type=Application
 Categories=Game;BoardGame;
 StartupNotify=true
-

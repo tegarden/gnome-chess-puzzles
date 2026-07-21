@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tegarden.gnome-chess-puzzles</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Chess Puzzles</name>
+  <summary>Practice chess with tactical puzzles</summary>
+  <description>
+    <p>
+      Chess Puzzles is an offline tactics trainer for improving your chess.
+      Solve puzzles selected near your current rating, retry mistakes, and
+      review your results and rating history.
+    </p>
+  </description>
+  <developer id="io.github.tegarden">
+    <name>Benjamin Tegarden</name>
+  </developer>
+  <launchable type="desktop-id">io.github.tegarden.gnome-chess-puzzles.desktop</launchable>
+  <url type="homepage">https://github.com/tegarden/gnome-chess-puzzles</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-07-21">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

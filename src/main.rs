@@ -9,8 +9,8 @@ mod history;
 mod move_list;
 mod puzzle;
 
-const APPLICATION_ID: &str = "io.github.tegarden.GnomeChessPuzzles";
-const APPLICATION_NAME: &str = "Gnome Chess Puzzles";
+const APPLICATION_ID: &str = "io.github.tegarden.gnome-chess-puzzles";
+const APPLICATION_NAME: &str = "Chess Puzzles";
 const WINDOW_TITLE: &str = "Chess Puzzles";
 const MOVE_PLAYBACK_DELAY: Duration = Duration::from_millis(500);
 

@@ -1,0 +1,36 @@
+id: io.github.tegarden.gnome-chess-puzzles
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: gnome-chess-puzzles
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+
+modules:
+  - name: gnome-chess-puzzles
+    buildsystem: meson
+    config-opts:
+      - --buildtype=release
+    build-options:
+      env:
+        CARGO_HOME: /run/build/gnome-chess-puzzles/cargo
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - .flatpak-builder
+          - build
+          - dist
+          - flatpak-build
+          - flatpak-repo
+          - target
+      - cargo-sources.json

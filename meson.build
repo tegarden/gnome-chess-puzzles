@@ -31,11 +31,26 @@ custom_target(
 )
 
 install_data(
-  'data/io.github.tegarden.GnomeChessPuzzles.desktop',
+  'data/io.github.tegarden.gnome-chess-puzzles.desktop',
   install_dir: get_option('datadir') / 'applications',
+)
+
+install_data(
+  'data/io.github.tegarden.gnome-chess-puzzles.metainfo.xml',
+  install_dir: get_option('datadir') / 'metainfo',
+)
+
+install_data(
+  'data/icons/io.github.tegarden.gnome-chess-puzzles.svg',
+  install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps',
 )
 
 install_data(
   'data/puzzles.sqlite',
   install_dir: application_data_dir,
+)
+
+install_data(
+  'LICENSE',
+  install_dir: get_option('datadir') / 'licenses' / 'io.github.tegarden.gnome-chess-puzzles',
 )

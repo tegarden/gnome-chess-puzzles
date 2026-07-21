@@ -12,6 +12,38 @@ meson compile -C build
 Close the window or press <kbd>Ctrl</kbd>+<kbd>Q</kbd> to exit. For a release
 build, configure with `meson setup build --buildtype=release`.
 
+## Building a Flatpak bundle
+
+Install Flatpak, the `org.flatpak.Builder` application (or the native
+`flatpak-builder` command), the GNOME 50 SDK, and the Rust stable SDK extension.
+With Flathub configured as `flathub`, the required Flatpaks can be installed
+with:
+
+```sh
+flatpak install --user flathub \
+  org.flatpak.Builder \
+  org.gnome.Sdk//50 \
+  org.freedesktop.Sdk.Extension.rust-stable//25.08
+```
+
+Build the application and its single-file bundle with:
+
+```sh
+./build-aux/build-flatpak.sh
+```
+
+The resulting bundle is
+`dist/io.github.tegarden.gnome-chess-puzzles.flatpak`. It can be sent directly
+to users and installed with:
+
+```sh
+flatpak install --user dist/io.github.tegarden.gnome-chess-puzzles.flatpak
+```
+
+The bundle points to Flathub for its GNOME runtime dependency. Set
+`GCP_FLATPAK_REMOTE` when the build dependencies are provided by a differently
+named Flatpak remote.
+
 ## Proposed architecture
 
 ```
