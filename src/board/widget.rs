@@ -95,6 +95,7 @@ mod imp {
             );
 
             let perspective = self.perspective.get().unwrap_or(Color::White);
+            append_coordinates(snapshot, widget.upcast_ref(), geometry, perspective);
             let highlights = self.highlights.borrow();
             for row in 0..8 {
                 for file in 0..8 {
@@ -413,6 +414,84 @@ fn display_coordinates(file: usize, rank: usize, user_color: Color) -> (usize, u
     }
 }
 
+fn displayed_file(display_file: usize, perspective: Color) -> char {
+    let file = match perspective {
+        Color::White => display_file,
+        Color::Black => 7 - display_file,
+    };
+    char::from(b'a' + file as u8)
+}
+
+fn displayed_rank(display_row: usize, perspective: Color) -> usize {
+    match perspective {
+        Color::White => 8 - display_row,
+        Color::Black => display_row + 1,
+    }
+}
+
+fn append_coordinates(
+    snapshot: &gtk::Snapshot,
+    widget: &gtk::Widget,
+    geometry: BoardGeometry,
+    perspective: Color,
+) {
+    let frame_size = geometry.squares_x - geometry.board_x;
+    let font_size = frame_size * 0.48;
+    let foreground = gdk::RGBA::WHITE;
+    let top_y = geometry.board_y + frame_size / 2.0;
+    let bottom_y = geometry.squares_y + 8.0 * geometry.square_size + frame_size / 2.0;
+    let left_x = geometry.board_x + frame_size / 2.0;
+    let right_x = geometry.squares_x + 8.0 * geometry.square_size + frame_size / 2.0;
+
+    for display_file in 0..8 {
+        let x = geometry.squares_x + (display_file as f32 + 0.5) * geometry.square_size;
+        let label = displayed_file(display_file, perspective).to_string();
+        append_centered_label(snapshot, widget, &label, x, top_y, font_size, &foreground);
+        append_centered_label(
+            snapshot,
+            widget,
+            &label,
+            x,
+            bottom_y,
+            font_size,
+            &foreground,
+        );
+    }
+
+    for display_row in 0..8 {
+        let y = geometry.squares_y + (display_row as f32 + 0.5) * geometry.square_size;
+        let label = displayed_rank(display_row, perspective).to_string();
+        append_centered_label(snapshot, widget, &label, left_x, y, font_size, &foreground);
+        append_centered_label(snapshot, widget, &label, right_x, y, font_size, &foreground);
+    }
+}
+
+fn append_centered_label(
+    snapshot: &gtk::Snapshot,
+    widget: &gtk::Widget,
+    text: &str,
+    center_x: f32,
+    center_y: f32,
+    font_size: f32,
+    color: &gdk::RGBA,
+) {
+    let layout = widget.create_pango_layout(Some(text));
+    let mut font = gtk::pango::FontDescription::new();
+    font.set_family("Sans");
+    font.set_weight(gtk::pango::Weight::Bold);
+    font.set_absolute_size(f64::from(font_size) * f64::from(gtk::pango::SCALE));
+    layout.set_font_description(Some(&font));
+    let (width, height) = layout.pixel_size();
+
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(
+        center_x - width as f32 / 2.0,
+        center_y - height as f32 / 2.0,
+    ));
+    snapshot.append_layout(&layout, color);
+    snapshot.restore();
+}
+
 fn append_piece(
     snapshot: &gtk::Snapshot,
     texture: &gdk::Texture,
@@ -461,6 +540,19 @@ mod tests {
     fn black_has_rank_eight_at_bottom() {
         assert_eq!(display_coordinates(0, 0, Color::Black), (7, 0));
         assert_eq!(display_coordinates(7, 7, Color::Black), (0, 7));
+    }
+
+    #[test]
+    fn coordinate_labels_follow_the_board_perspective() {
+        assert_eq!(displayed_file(0, Color::White), 'a');
+        assert_eq!(displayed_file(7, Color::White), 'h');
+        assert_eq!(displayed_rank(0, Color::White), 8);
+        assert_eq!(displayed_rank(7, Color::White), 1);
+
+        assert_eq!(displayed_file(0, Color::Black), 'h');
+        assert_eq!(displayed_file(7, Color::Black), 'a');
+        assert_eq!(displayed_rank(0, Color::Black), 1);
+        assert_eq!(displayed_rank(7, Color::Black), 8);
     }
 
     #[test]
