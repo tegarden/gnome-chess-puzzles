@@ -19,6 +19,14 @@
   <url type="homepage">https://github.com/tegarden/gnome-chess-puzzles</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-07-22">
+      <description>
+        <ul>
+          <li>Display coordinates around every side of the chessboard.</li>
+          <li>Compress the bundled puzzle catalogue to reduce the application size.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-21">
       <description>
         <p>Initial release.</p>
