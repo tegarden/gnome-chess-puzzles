@@ -1,13 +1,19 @@
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use super::{ChessMove, Position};
 
+const COMPRESSED_DATABASE_FILE: &str = "puzzles.sqlite.zst";
 const DATABASE_FILE: &str = "puzzles.sqlite";
+const DATABASE_SOURCE_MARKER: &str = "puzzles.sqlite.source";
+const CACHE_DIRECTORY: &str = "gnome-chess-puzzles";
 const DATA_DIR_ENVIRONMENT_VARIABLE: &str = "GNOME_CHESS_PUZZLES_DATA_DIR";
 type PuzzleRow = (String, String, String, i64, i64);
 
@@ -24,7 +30,7 @@ pub fn load_for_player(
     player_rating: i32,
     completed_puzzle_ids: &HashSet<String>,
 ) -> Result<Puzzle, LoadError> {
-    let database_path = database_path();
+    let database_path = database_path()?;
     let database = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| {
             LoadError(format!(
@@ -111,13 +117,22 @@ fn read_puzzle_row(row: &Row<'_>) -> rusqlite::Result<PuzzleRow> {
     ))
 }
 
-fn database_path() -> PathBuf {
+fn database_path() -> Result<PathBuf, LoadError> {
+    let compressed_path = compressed_database_path();
+    let cache_directory = adw::glib::user_cache_dir().join(CACHE_DIRECTORY);
+    let database_path = cache_directory.join(DATABASE_FILE);
+    let marker_path = cache_directory.join(DATABASE_SOURCE_MARKER);
+    unpack_database(&compressed_path, &database_path, &marker_path)?;
+    Ok(database_path)
+}
+
+fn compressed_database_path() -> PathBuf {
     if let Some(directory) = env::var_os(DATA_DIR_ENVIRONMENT_VARIABLE) {
-        return PathBuf::from(directory).join(DATABASE_FILE);
+        return PathBuf::from(directory).join(COMPRESSED_DATABASE_FILE);
     }
 
     if let Some(directory) = option_env!("GCP_DATA_DIR") {
-        let installed = Path::new(directory).join(DATABASE_FILE);
+        let installed = Path::new(directory).join(COMPRESSED_DATABASE_FILE);
         if installed.is_file() {
             return installed;
         }
@@ -125,7 +140,61 @@ fn database_path() -> PathBuf {
 
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("data")
-        .join(DATABASE_FILE)
+        .join(COMPRESSED_DATABASE_FILE)
+}
+
+fn unpack_database(
+    compressed_path: &Path,
+    database_path: &Path,
+    marker_path: &Path,
+) -> Result<(), LoadError> {
+    let metadata = compressed_path.metadata().map_err(|error| {
+        LoadError(format!(
+            "could not read {}: {error}",
+            compressed_path.display()
+        ))
+    })?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |value| value.as_nanos());
+    let source_marker = format!("{}:{modified}", metadata.len());
+    if database_path.is_file()
+        && fs::read_to_string(marker_path).is_ok_and(|value| value == source_marker)
+    {
+        return Ok(());
+    }
+
+    let cache_directory = database_path
+        .parent()
+        .ok_or_else(|| LoadError("the puzzle database cache path has no parent".into()))?;
+    fs::create_dir_all(cache_directory).map_err(|error| {
+        LoadError(format!(
+            "could not create puzzle database cache {}: {error}",
+            cache_directory.display()
+        ))
+    })?;
+    let temporary_path = cache_directory.join(format!("puzzles.sqlite.{}.tmp", std::process::id()));
+    let result = (|| {
+        let input = File::open(compressed_path)?;
+        let mut decoder = zstd::stream::read::Decoder::new(BufReader::new(input))?;
+        let output = File::create(&temporary_path)?;
+        let mut output = BufWriter::new(output);
+        std::io::copy(&mut decoder, &mut output)?;
+        output.flush()?;
+        fs::rename(&temporary_path, database_path)?;
+        fs::write(marker_path, source_marker)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(LoadError(format!(
+            "could not unpack {}: {error}",
+            compressed_path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -140,6 +209,11 @@ impl fmt::Display for LoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_compressed(path: &Path, contents: &[u8]) {
+        let compressed = zstd::stream::encode_all(contents, 1).unwrap();
+        fs::write(path, compressed).unwrap();
+    }
 
     #[test]
     fn selects_nearest_uncompleted_rating_then_lowest_deviation() {
@@ -211,5 +285,30 @@ mod tests {
                 .0,
             "lower-deviation"
         );
+    }
+
+    #[test]
+    fn unpacks_the_database_and_refreshes_it_when_the_source_changes() {
+        let directory = env::temp_dir().join(format!(
+            "gnome-chess-puzzles-unpack-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let compressed = directory.join(COMPRESSED_DATABASE_FILE);
+        let database = directory.join(DATABASE_FILE);
+        let marker = directory.join(DATABASE_SOURCE_MARKER);
+
+        write_compressed(&compressed, b"first database");
+        unpack_database(&compressed, &database, &marker).unwrap();
+        assert_eq!(fs::read(&database).unwrap(), b"first database");
+
+        write_compressed(&compressed, b"replacement database contents");
+        unpack_database(&compressed, &database, &marker).unwrap();
+        assert_eq!(
+            fs::read(&database).unwrap(),
+            b"replacement database contents"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

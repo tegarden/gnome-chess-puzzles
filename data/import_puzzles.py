@@ -7,6 +7,7 @@ import argparse
 import csv
 import heapq
 import io
+import shutil
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 
 DATA_DIR = Path(__file__).resolve().parent
 DEFAULT_SOURCE = DATA_DIR / "lichess_db_puzzle.csv.zst"
-DEFAULT_OUTPUT = DATA_DIR / "puzzles.sqlite"
+DEFAULT_OUTPUT = DATA_DIR / "puzzles.sqlite.zst"
 SCHEMA = DATA_DIR / "schema.sql"
 EXPECTED_COLUMNS = [
     "PuzzleId",
@@ -49,6 +50,29 @@ def open_zstd_text(path: Path) -> io.TextIOWrapper:
         binary_stream = zstd.open(path, "rb")
 
     return io.TextIOWrapper(binary_stream, encoding="utf-8", newline="")
+
+
+def compress_database(source: Path, output: Path) -> None:
+    """Compress a completed SQLite database as a Zstandard stream."""
+    output.unlink(missing_ok=True)
+    try:
+        from compression import zstd  # Python 3.14+
+    except ImportError:
+        try:
+            import zstandard as zstd  # type: ignore[no-redef,import-not-found]
+        except ImportError as error:
+            raise SystemExit(
+                "Zstandard support is required: use Python 3.14+ or install "
+                "the 'zstandard' package."
+            ) from error
+
+        with source.open("rb") as source_file, output.open("wb") as output_file:
+            zstd.ZstdCompressor(level=19).copy_stream(source_file, output_file)
+    else:
+        with source.open("rb") as source_file, zstd.open(
+            output, "wb", level=19
+        ) as output_file:
+            shutil.copyfileobj(source_file, output_file)
 
 
 def validate_count(value: str) -> int:
@@ -111,9 +135,10 @@ def import_puzzles(
         raise SystemExit(f"Puzzle export not found: {source}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.unlink(missing_ok=True)
+    database_path = output.with_suffix("")
+    database_path.unlink(missing_ok=True)
 
-    with sqlite3.connect(output) as database:
+    with sqlite3.connect(database_path) as database:
         database.executescript(SCHEMA.read_text(encoding="utf-8"))
         with open_zstd_text(source) as source_file:
             reader = csv.DictReader(source_file)
@@ -152,6 +177,8 @@ def import_puzzles(
                 selected = (item[2] for item in sorted(most_popular, reverse=True))
                 imported = insert_rows(database, selected)
 
+    compress_database(database_path, output)
+    database_path.unlink()
     return scanned, imported
 
 

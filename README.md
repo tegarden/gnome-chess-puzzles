@@ -430,7 +430,7 @@ gnome-chess-puzzles/
 │   ├── app-id.metainfo.xml.in
 │   ├── app-id.gschema.xml
 │   ├── icons/
-│   └── puzzles.sqlite
+│   └── puzzles.sqlite.zst
 ├── engine/
 │   ├── stockfish/
 │   ├── COPYING

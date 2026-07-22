@@ -46,7 +46,7 @@ install_data(
 )
 
 install_data(
-  'data/puzzles.sqlite',
+  'data/puzzles.sqlite.zst',
   install_dir: application_data_dir,
 )
 

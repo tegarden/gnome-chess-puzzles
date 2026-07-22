@@ -1,8 +1,8 @@
 # Puzzle data
 
-`puzzles.sqlite` is the puzzle catalogue bundled with the application. Its
-schema is defined in `schema.sql` and it is generated from the upstream Lichess
-`lichess_db_puzzle.csv.zst` export.
+`puzzles.sqlite.zst` is the compressed puzzle catalogue bundled with the
+application. Its schema is defined in `schema.sql` and it is generated from the
+upstream Lichess `lichess_db_puzzle.csv.zst` export.
 
 The compressed upstream export is intentionally ignored by Git: it is an input
 to the build, not an application asset. Place it at
@@ -23,6 +23,8 @@ popularity puzzles are selected in source-file order.
 
 The script requires Python 3.14 or newer, or the third-party `zstandard` Python
 package on older Python versions. Alternate paths can be supplied with
-`--source` and `--output`.
+`--source` and `--output`. It builds a temporary SQLite database, compresses it
+after the database is closed, and removes the temporary uncompressed file after
+compression succeeds.
 
 The Lichess puzzle database is released under CC0.
