@@ -19,6 +19,14 @@
   <url type="homepage">https://github.com/tegarden/gnome-chess-puzzles</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.3.0" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Introduce a new application icon featuring a chess pawn and a puzzle piece.</li>
+          <li>Update the README documentation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-07-22">
       <description>
         <ul>
