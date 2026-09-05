@@ -1,12 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Chess Puzzles</title>
+  <desc>An ivory chess pawn on a blue jigsaw puzzle piece.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="puzzle" x1="20" y1="24" x2="104" y2="112" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#62a0ea"/>
       <stop offset="1" stop-color="#1c71d8"/>
     </linearGradient>
+    <linearGradient id="ivory" x1="48" y1="40" x2="82" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#deddda"/>
+    </linearGradient>
+    <path id="tile" d="M28 28H46C49 28 50 26 48 23C43 14 49 8 58 8C67 8 73 14 68 23C66 26 67 28 70 28H92C98 28 102 32 102 38V54C102 57 104 58 107 56C115 51 122 57 122 66C122 75 115 81 107 76C104 74 102 75 102 78V102C102 108 98 112 92 112H28C22 112 18 108 18 102V82C18 79 20 78 23 80C32 85 38 79 38 70C38 61 32 55 23 60C20 62 18 61 18 58V38C18 32 22 28 28 28Z"/>
   </defs>
-  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#background)"/>
-  <path d="M39 99h56l-4-13H44zm8-18h41c1-18-6-35-23-44l4-12c-12 2-23 9-29 20l10 7c-8 6-13 17-13 29zm9-34c0-3 2-5 5-5s5 2 5 5-2 5-5 5-5-2-5-5z" fill="#fff"/>
-  <path d="M44 86h47" fill="none" stroke="#c0d8f8" stroke-width="4" stroke-linecap="round"/>
+  <!-- A shallow lower edge gives the puzzle piece a solid profile. -->
+  <use href="#tile" transform="translate(0 5)" fill="#1a5fb4"/>
+  <use href="#tile" fill="url(#puzzle)"/>
+  <path d="M28 30H44M74 30H92C97 30 100 33 100 38" fill="none" stroke="#99c1f1" stroke-width="2" stroke-linecap="round"/>
+  <!-- A broad base and round head keep the pawn clear at small sizes. -->
+  <g fill="#1a5fb4" opacity="0.45" transform="translate(0 3)">
+    <circle cx="66" cy="48" r="12"/>
+    <path d="M58 60H74V66C73 77 76 83 82 88L85 94V101H47V94L50 88C56 83 59 77 58 66Z"/>
+  </g>
+  <path d="M59 62H73C72 75 74 82 81 87H51C58 82 60 75 59 62Z" fill="url(#ivory)"/>
+  <rect x="55" y="59" width="22" height="7" rx="3.5" fill="#c0bfbc"/>
+  <rect x="55" y="58" width="22" height="6" rx="3" fill="#f6f5f4"/>
+  <circle cx="66" cy="47" r="12" fill="url(#ivory)"/>
+  <path d="M59 43C60 40 63 39 66 39" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M51 86H81L85 94V99C85 101 83 102 81 102H51C49 102 47 101 47 99V94Z" fill="#c0bfbc"/>
+  <path d="M51 86H81L85 94H47Z" fill="url(#ivory)"/>
+  <rect x="47" y="93" width="38" height="6" rx="2" fill="#f6f5f4"/>
 </svg>
